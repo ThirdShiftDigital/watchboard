@@ -7,14 +7,13 @@
   NODE_VERSION = "22"
   NPM_FLAGS = "--include=dev"
 
-# TanStack Start / Nitro SSR — send all non-asset routes to the server function.
+# TanStack Start / Nitro SSR
 [[redirects]]
   from = "/*"
   to = "/.netlify/functions/server"
   status = 200
   force = false
 
-# Prefer hashed assets from publish dir when present
 [[headers]]
   for = "/assets/*"
   [headers.values]

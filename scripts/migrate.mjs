@@ -86,5 +86,20 @@ main().catch((err) => {
   for (const key of ["code", "detail", "hint", "position", "where"]) {
     if (err?.[key] != null) console.error(`[migrate]   ${key}: ${err[key]}`);
   }
+  // Netlify build machines often cannot reach Supabase direct (IPv6) hosts.
+  // Don't fail the whole deploy — apply SQL via Supabase SQL editor / pooler URL.
+  const code = err?.code;
+  if (
+    code === "ENETUNREACH" ||
+    code === "EHOSTUNREACH" ||
+    code === "ENOTFOUND" ||
+    code === "ECONNREFUSED" ||
+    code === "ETIMEDOUT"
+  ) {
+    console.error(
+      "[migrate] network error talking to DATABASE_URL — continuing build. Use a Supabase pooler URI (IPv4) for Netlify, and/or apply migrations in the Supabase SQL editor.",
+    );
+    process.exit(0);
+  }
   process.exit(1);
 });
