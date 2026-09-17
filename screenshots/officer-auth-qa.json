@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/me",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "Watch Board",
+      "hasCanvas": false,
+      "bodyTextLen": 159,
+      "bodyTextHash": "315e84901d50aaff8590b9100e31cadb66e9dbb5196d76c0f60dfa5a7b10c7d2",
+      "bodyTextPrefix": "OFFICER DAYS OFF · MY WATCH Board WHO ARE YOU? Pick your name. T",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/officer-auth-qa.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "Watch Board",
+      "hasCanvas": false,
+      "bodyTextLen": 159,
+      "bodyTextHash": "315e84901d50aaff8590b9100e31cadb66e9dbb5196d76c0f60dfa5a7b10c7d2",
+      "bodyTextPrefix": "OFFICER DAYS OFF · MY WATCH Board WHO ARE YOU? Pick your name. T",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/officer-auth-qa-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/officer-auth-qa.json"
+}

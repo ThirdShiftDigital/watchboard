@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/login",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "Watch Board",
+      "hasCanvas": false,
+      "bodyTextLen": 27,
+      "bodyTextHash": "d80c06d3c5bf6fe495b4e69648cf1d0f2179908ae6110674a7e3c8a688bb013d",
+      "bodyTextPrefix": "Checking supervisor access…",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/login-qa.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "Watch Board",
+      "hasCanvas": false,
+      "bodyTextLen": 127,
+      "bodyTextHash": "8c00a474118128df1474486611251dc40ea76ad292368dad89ff7e48035f7a13",
+      "bodyTextPrefix": "WATCH BOARD SUPERVISOR SIGN-IN EMAIL PASSWORD Sign inNeed an acc",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/login-qa-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/login-qa.json"
+}

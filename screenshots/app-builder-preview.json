@@ -1,0 +1,38 @@
+{
+  "url": "http://127.0.0.1:8080/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "Watch Board",
+      "hasCanvas": false,
+      "bodyTextLen": 549,
+      "bodyTextHash": "74fa458afe9e249012cbd3a307d30b55daa90c35e90508385e35312612711b15",
+      "bodyTextPrefix": "WATCH BOARD PATROL OPERATIONS Zones Shift Schedule Requests Cale",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "Watch Board",
+      "hasCanvas": false,
+      "bodyTextLen": 519,
+      "bodyTextHash": "c48f147c532ca13b09afb1a27a4b43cb50a5621c51b1c9e422f9759d3f47c6e6",
+      "bodyTextPrefix": "ZONES SUN, SEP 13, 2026 11 WORKING · 6 OFF 11 ASSIGNED SHOW OFF-",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview-mobile.png"
+    }
+  },
+  "brandWarnings": [
+    "BRAND NOTE: no custom public/og.jpg — the platform will serve the og.grok.me placeholder. Custom cards are the default for games of every kind (DOM board/word games included), whimsical apps, creative tools, and brand-forward pages — only plain utilities (converters, CRUD trackers, admin dashboards) keep the placeholder. If this app is not a plain utility, finish the brand-asset pass per /workspace/.grok/skills/og/SKILL.md."
+  ],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-preview.json"
+}

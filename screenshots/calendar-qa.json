@@ -1,0 +1,38 @@
+{
+  "url": "http://127.0.0.1:8080/calendar",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "Watch Board",
+      "hasCanvas": false,
+      "bodyTextLen": 778,
+      "bodyTextHash": "5bd2a76504b2a16c164f0d5b8359b86042411382105347c6c316434bb6bb4fd5",
+      "bodyTextPrefix": "WATCH BOARD PATROL OPERATIONS Zones Shift Schedule Requests 1 Ca",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/calendar-qa.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "Watch Board",
+      "hasCanvas": false,
+      "bodyTextLen": 746,
+      "bodyTextHash": "e6456d362428152d8622f65bc7b36a0f5162f3f6b5a3cbd19f61845ff19bdb2e",
+      "bodyTextPrefix": "CALENDAR SEPTEMBER 2026 Connecting to Google Calendar… SUN MON T",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/calendar-qa-mobile.png"
+    }
+  },
+  "brandWarnings": [
+    "BRAND NOTE: no custom public/og.jpg — the platform will serve the og.grok.me placeholder. Custom cards are the default for games of every kind (DOM board/word games included), whimsical apps, creative tools, and brand-forward pages — only plain utilities (converters, CRUD trackers, admin dashboards) keep the placeholder. If this app is not a plain utility, finish the brand-asset pass per /workspace/.grok/skills/og/SKILL.md."
+  ],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/calendar-qa.json"
+}

@@ -1,0 +1,108 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@theme {
+  --font-sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Barlow Condensed", "IBM Plex Sans", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --text-2xs: 0.6875rem;
+  --text-micro: 0.625rem;
+  --tracking-label: 0.14em;
+  --tracking-wide-plus: 0.16em;
+
+  --color-background: #0c0d0f;
+  --color-foreground: #eceef1;
+  --color-card: #141518;
+  --color-card-2: #1b1d21;
+  --color-header: #16181c;
+  --color-muted: #8d929c;
+  --color-subtle: #6a707a;
+  --color-border: #2a2d33;
+  --color-border-strong: #3a3e46;
+  --color-primary: #7a9b3a;
+  --color-primary-foreground: #0b0d08;
+  --color-primary-hover: #8aad48;
+  --color-ring: #7a9b3a;
+  --color-destructive: #c45454;
+  --color-success: #3f8f6b;
+  --color-warning: #b08a48;
+  --color-rdo: #3d4450;
+  --color-rdo-fg: #e6e9ee;
+
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+
+  --shadow-panel: 0 18px 50px -24px rgb(0 0 0 / 0.7);
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background: var(--color-background);
+    color: var(--color-foreground);
+  }
+
+  html,
+  body,
+  #app {
+    min-height: 100%;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background: var(--color-background);
+    color: var(--color-foreground);
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  h1, h2, h3 {
+    text-wrap: balance;
+    font-family: var(--font-display);
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.zone-cols {
+  grid-template-columns: minmax(0, 1fr) 4.5rem 6.25rem;
+}
+
+.sched-grid {
+  display: grid;
+  grid-template-columns: minmax(12rem, 15rem) repeat(7, minmax(0, 1fr));
+}
+
+.fab-dock {
+  bottom: calc(5.75rem + env(safe-area-inset-bottom, 0px));
+}
+
+@media (min-width: 768px) {
+  .fab-dock {
+    bottom: 2rem;
+  }
+}
