@@ -171,7 +171,7 @@ export async function seedThirdShiftRoster() {
           officer_id = ${keyes[0].id},
           shift_id = coalesce(nullif(shift_id, ''), ${shiftId}),
           active_shift_id = coalesce(nullif(active_shift_id, ''), ${shiftId})
-      where email ilike '%keyes%' or name ilike '%keyes%'
+      where (name ilike 'LT.%KEYES%' or name ilike 'LT. C. KEYES') and email not ilike 'ckeyes%'
     `;
   }
 

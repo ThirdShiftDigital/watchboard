@@ -126,8 +126,12 @@ export async function ensureShifts() {
   await seedFirstShiftRoster();
   const { seedSecondShiftRoster } = await import("@/lib/second-shift-roster");
   await seedSecondShiftRoster();
-  const { seedThirdShiftRoster } = await import("@/lib/third-shift-roster");
-  await seedThirdShiftRoster();
+  try {
+    const { seedThirdShiftRoster } = await import("@/lib/third-shift-roster");
+    await seedThirdShiftRoster();
+  } catch (err) {
+    console.error("[ensureShifts] third-shift roster seed failed", err);
+  }
 }
 
 export async function listShiftRows(agencyId?: string): Promise<Shift[]> {
