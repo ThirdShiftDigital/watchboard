@@ -10,7 +10,7 @@ import {
   type Shift,
 } from "@/lib/types";
 
-export const DEFAULT_SHIFT_ID = "default";
+export const DEFAULT_SHIFT_ID = "first-shift";
 
 type ShiftRow = {
   id: string;
