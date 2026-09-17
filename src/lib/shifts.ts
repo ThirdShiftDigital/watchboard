@@ -143,12 +143,12 @@ export async function listShiftRows(agencyId?: string): Promise<Shift[]> {
         select id, name, start_time, end_time, effective_date, min_working, zone_order, calendar_feed_url, agency_id, google_calendar
         from shifts
         where agency_id = ${agencyId} or agency_id is null
-        order by created_at asc, name asc
+        order by start_time asc, name asc
       `
     : await sql<ShiftRow>`
         select id, name, start_time, end_time, effective_date, min_working, zone_order, calendar_feed_url, agency_id, google_calendar
         from shifts
-        order by created_at asc, name asc
+        order by start_time asc, name asc
       `;
   return rows.map(mapShift);
 }
