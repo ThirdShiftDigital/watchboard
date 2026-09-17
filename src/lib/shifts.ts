@@ -126,6 +126,8 @@ export async function ensureShifts() {
   await seedFirstShiftRoster();
   const { seedSecondShiftRoster } = await import("@/lib/second-shift-roster");
   await seedSecondShiftRoster();
+  const { seedThirdShiftRoster } = await import("@/lib/third-shift-roster");
+  await seedThirdShiftRoster();
 }
 
 export async function listShiftRows(agencyId?: string): Promise<Shift[]> {
@@ -136,7 +138,7 @@ export async function listShiftRows(agencyId?: string): Promise<Shift[]> {
     ? await sql<ShiftRow>`
         select id, name, start_time, end_time, effective_date, min_working, zone_order, calendar_feed_url, agency_id, google_calendar
         from shifts
-        where agency_id = ${agencyId}
+        where agency_id = ${agencyId} or agency_id is null
         order by created_at asc, name asc
       `
     : await sql<ShiftRow>`
