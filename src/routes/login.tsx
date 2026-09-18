@@ -42,17 +42,13 @@ function Login() {
   const formMode = mode;
   const canUseBoard = Boolean(access.data?.caps.viewBoard);
 
-  if (isPending) {
-    return (
-      <main className="grid min-h-dvh place-items-center bg-background px-6">
-        <p className="text-sm text-muted">Checking supervisor access…</p>
-      </main>
-    );
+  // Keep the sign-in form up front. Only leave after session/access resolve.
+  if (!isPending && user && code) return <Navigate to="/onboard" search={{ code }} />;
+  if (!isPending && user && next === "/onboard") return <Navigate to="/onboard" />;
+  if (!isPending && user && canUseBoard && !switchAccount) return <Navigate to="/" />;
+  if (!isPending && user && access.data && !canUseBoard && !switchAccount) {
+    return <Navigate to="/me" />;
   }
-  if (user && code) return <Navigate to="/onboard" search={{ code }} />;
-  if (user && next === "/onboard") return <Navigate to="/onboard" />;
-  if (user && canUseBoard && !switchAccount) return <Navigate to="/" />;
-  if (user && access.data && !canUseBoard && !switchAccount) return <Navigate to="/me" />;
 
   async function submit() {
     if (!authEnabled) return;
