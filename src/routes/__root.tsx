@@ -58,6 +58,10 @@ export const Route = createRootRoute({
         { name: "viewport", content: "width=device-width, initial-scale=1" },
         { title: APP_NAME },
         { name: "description", content: description },
+        {
+          name: "google-site-verification",
+          content: "4WlsAvycp3Sz8ZIL2NNl7ibzTW3ciGu_pm4Di383qhc",
+        },
         { name: "theme-color", content: "#0c0d0f" },
         { name: "application-name", content: APP_NAME },
         { name: "apple-mobile-web-app-title", content: APP_NAME },
