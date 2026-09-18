@@ -384,7 +384,7 @@ function MyLoginCard({
         ) : null}
         {mine && mine.permission === "captain" ? (
           <p className="mt-3 text-xs uppercase tracking-wide text-primary">You lead this division</p>
-        ) : mine && mine.permission !== "admin" && !mine.caps.manageAgency ? (
+        ) : mine && mine.canClaimCommand ? (
           <Button
             className="mt-4 w-full"
             onClick={async () => {

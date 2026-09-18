@@ -116,22 +116,24 @@ function Login() {
               Signed in as {user.displayName ?? user.primaryEmail}
               {canUseBoard ? "" : ", officer access only"}.
             </p>
-            <Button
-              className="w-full"
-              disabled={busy}
-              onClick={async () => {
-                setBusy(true);
-                try {
-                  await claimShiftCommand();
-                  window.location.href = "/";
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : "Could not take command");
-                  setBusy(false);
-                }
-              }}
-            >
-              Make me shift commander
-            </Button>
+            {access.data?.canClaimCommand ? (
+              <Button
+                className="w-full"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    await claimShiftCommand();
+                    window.location.href = "/";
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : "Could not take command");
+                    setBusy(false);
+                  }
+                }}
+              >
+                Make me shift commander
+              </Button>
+            ) : null}
           </div>
         ) : null}
 

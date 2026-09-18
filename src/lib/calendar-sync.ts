@@ -1,7 +1,9 @@
 import {
   createGoogleLeaveEvent,
+  createGoogleLeaveEventOAuth,
   deleteGoogleLeaveEvent,
   fetchGoogleCalendar,
+  fetchGoogleCalendarOAuth,
   leaveEventTitle,
 } from "@/lib/google-calendar";
 import { getConnectorAccessToken } from "@/lib/app-data/client.server";
@@ -128,6 +130,23 @@ export async function loadShiftCalendar(input: {
     };
   }
 
+  // Prefer standalone OAuth tokens stored on the shift (Netlify).
+  const { getValidAccessTokenForShift } = await import("@/lib/google-oauth");
+  const oauth = await getValidAccessTokenForShift(shift.id).catch(() => null);
+  if (oauth?.accessToken) {
+    const google = await fetchGoogleCalendarOAuth(shift.id, officers, timeMin, timeMax);
+    if (google.kind === "ok") {
+      await saveCache(shift.id, google.events).catch(() => undefined);
+      return {
+        ...google,
+        events: mergeEvents(google.events, ics?.kind === "ok" ? ics.events : []),
+      };
+    }
+    if (google.kind === "login" && canConnect) {
+      return google;
+    }
+  }
+
   const hasToken = Boolean(getConnectorAccessToken());
   if (hasToken || canConnect) {
     const google = await fetchGoogleCalendar(officers, timeMin, timeMax);
@@ -172,13 +191,41 @@ export async function loadShiftCalendar(input: {
   };
 }
 
-export async function connectShiftGoogle(shiftId: string): Promise<{
+export async function connectShiftGoogle(
+  shiftId: string,
+  userId: string,
+): Promise<{
   connected: boolean;
   pending?: boolean;
   loginRequired?: boolean;
   loginUrl?: string;
   message?: string;
 }> {
+  const {
+    googleOAuthConfigured,
+    buildGoogleAuthUrl,
+    getValidAccessTokenForShift,
+  } = await import("@/lib/google-oauth");
+
+  // Already have stored OAuth tokens — mark connected.
+  const existing = await getValidAccessTokenForShift(shiftId).catch(() => null);
+  if (existing?.accessToken) {
+    const { getSql } = await import("@/lib/db");
+    const sql = await getSql();
+    await sql`update shifts set google_calendar = true where id = ${shiftId}`;
+    return { connected: true };
+  }
+
+  if (googleOAuthConfigured()) {
+    return {
+      connected: false,
+      loginRequired: true,
+      loginUrl: buildGoogleAuthUrl({ shiftId, userId }),
+      message: "Continue in Google to connect this shift calendar.",
+    };
+  }
+
+  // Legacy Grok connector probe (preview / Grok-hosted only).
   const { todayISO, addDays } = await import("@/lib/dates");
   const today = todayISO();
   const probe = await fetchGoogleCalendar([], today, addDays(today, 1));
@@ -202,17 +249,19 @@ export async function connectShiftGoogle(shiftId: string): Promise<{
   }
   return {
     connected: false,
-    message: probe.message ?? "Could not reach Google Calendar.",
+    message:
+      probe.message ??
+      "Google Calendar OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET on Netlify.",
   };
 }
 
 export async function disconnectShiftGoogle(shiftId: string) {
-  const { getSql } = await import("@/lib/db");
-  const sql = await getSql();
-  await sql`update shifts set google_calendar = false where id = ${shiftId}`;
+  const { clearShiftGoogleTokens } = await import("@/lib/google-oauth");
+  await clearShiftGoogleTokens(shiftId);
 }
 
 export async function writeApprovedLeave(input: {
+  shiftId: string;
   googleCalendar: boolean;
   lastName: string;
   kind: RequestKind;
@@ -221,8 +270,18 @@ export async function writeApprovedLeave(input: {
   reason: string;
 }): Promise<string | null> {
   if (!input.googleCalendar) return null;
+  const summary = leaveEventTitle(input.lastName, kindLabel(input.kind));
+  // Prefer standalone OAuth on Netlify.
+  const oauthWritten = await createGoogleLeaveEventOAuth({
+    shiftId: input.shiftId,
+    summary,
+    description: input.reason,
+    startDate: input.startDate,
+    endDate: input.endDate,
+  });
+  if (oauthWritten.ok) return oauthWritten.eventId;
   const written = await createGoogleLeaveEvent({
-    summary: leaveEventTitle(input.lastName, kindLabel(input.kind)),
+    summary,
     description: input.reason,
     startDate: input.startDate,
     endDate: input.endDate,

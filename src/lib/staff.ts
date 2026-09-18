@@ -547,7 +547,7 @@ async function ensureStaff(userId: string): Promise<StaffAccount> {
   };
 }
 
-export async function accessFor(userId: string): Promise<StaffAccount & { caps: Caps }> {
+export async function accessFor(userId: string): Promise<StaffAccount & { caps: Caps; canClaimCommand: boolean }> {
   const staff = await ensureStaff(userId);
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
@@ -560,7 +560,23 @@ export async function accessFor(userId: string): Promise<StaffAccount & { caps: 
     agencyAdmin = Boolean(rows[0]?.agency_admin);
   }
   const full = { ...staff, agencyAdmin };
-  return { ...full, caps: capsFor(full.permission, { isOwner: full.isOwner, agencyAdmin }) };
+  let canClaimCommand = false;
+  if (full.permission !== "admin" && !full.isOwner && !agencyAdmin) {
+    const admins = full.agencyId
+      ? await sql<{ n: number }>`
+          select count(*)::int as n from staff_accounts
+          where permission = 'admin' and agency_id = ${full.agencyId}
+        `
+      : await sql<{ n: number }>`
+          select count(*)::int as n from staff_accounts where permission = 'admin'
+        `;
+    canClaimCommand = (admins[0]?.n ?? 0) === 0;
+  }
+  return {
+    ...full,
+    caps: capsFor(full.permission, { isOwner: full.isOwner, agencyAdmin }),
+    canClaimCommand,
+  };
 }
 
 export async function requireCap(userId: string, cap: keyof Caps) {
@@ -584,14 +600,35 @@ export const claimShiftCommand = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     const me = await accessFor(context.userId);
+    if (me.permission === "admin" || me.caps.manageAccounts || me.isOwner || me.agencyAdmin) {
+      return me;
+    }
     const { getSql } = await import("@/lib/db");
     const sql = await getSql();
+    // Bootstrap only when this agency (or the whole board) has no commander yet.
+    const admins = me.agencyId
+      ? await sql<{ n: number }>`
+          select count(*)::int as n from staff_accounts
+          where permission = 'admin' and agency_id = ${me.agencyId}
+        `
+      : await sql<{ n: number }>`
+          select count(*)::int as n from staff_accounts where permission = 'admin'
+        `;
+    if ((admins[0]?.n ?? 0) > 0) {
+      throw new Error(
+        "Ask an existing shift commander or agency admin to promote you on Accounts.",
+      );
+    }
     await sql`
       update staff_accounts
       set permission = 'admin'
       where user_id = ${context.userId}
     `;
-    return { ...me, permission: "admin" as const, caps: capsFor("admin", { isOwner: me.isOwner, agencyAdmin: me.agencyAdmin }) };
+    return {
+      ...me,
+      permission: "admin" as const,
+      caps: capsFor("admin", { isOwner: me.isOwner, agencyAdmin: me.agencyAdmin }),
+    };
   });
 
 export const linkMyOfficer = createServerFn({ method: "POST" })

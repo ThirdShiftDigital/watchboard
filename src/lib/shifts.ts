@@ -70,6 +70,11 @@ export async function ensureShifts() {
   await sql.query(`alter table staff_accounts add column if not exists active_shift_id text`);
   await sql.query(`alter table shifts add column if not exists agency_id text`);
   await sql.query(`alter table shifts add column if not exists google_calendar boolean not null default false`);
+  await sql.query(`alter table shifts add column if not exists google_access_token text`);
+  await sql.query(`alter table shifts add column if not exists google_refresh_token text`);
+  await sql.query(`alter table shifts add column if not exists google_token_expiry text`);
+  await sql.query(`alter table shifts add column if not exists google_calendar_id text`);
+  await sql.query(`alter table shifts add column if not exists google_connected_by text`);
   await sql.query(`
     create table if not exists calendar_cache (
       shift_id   text not null,

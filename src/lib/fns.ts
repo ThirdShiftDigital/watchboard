@@ -444,6 +444,7 @@ export const setRequestStatus = createServerFn({ method: "POST" })
           and date <= ${row.end_date}
       `;
       const eventId = await writeApprovedLeave({
+        shiftId: shift.id,
         googleCalendar: Boolean(shift.googleCalendar),
         lastName: officer?.lastName || officer?.name || "LEAVE",
         kind: row.kind as RequestKind,
@@ -500,6 +501,7 @@ export const callInLeave = createServerFn({ method: "POST" })
         and date <= ${data.endDate}
     `;
     const eventId = await writeApprovedLeave({
+      shiftId: shift.id,
       googleCalendar: Boolean(shift.googleCalendar),
       lastName: officer.lastName || officer.name,
       kind: data.kind,
@@ -804,7 +806,7 @@ export const connectGoogleCalendar = createServerFn({ method: "POST" })
   .handler(async ({ context }) => {
     await requireCap(context.userId, "editWatch");
     const shift = await currentShiftFor(context.userId);
-    return connectShiftGoogle(shift.id);
+    return connectShiftGoogle(shift.id, context.userId);
   });
 
 export const disconnectGoogleCalendar = createServerFn({ method: "POST" })

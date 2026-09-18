@@ -189,3 +189,94 @@ export async function deleteGoogleLeaveEvent(
 export function leaveEventTitle(lastName: string, kindLabel: string): string {
   return `${lastName.toUpperCase()} ${kindLabel.toUpperCase()}`;
 }
+
+export async function fetchGoogleCalendarOAuth(
+  shiftId: string,
+  officers: Officer[],
+  timeMin: string,
+  timeMax: string,
+): Promise<CalendarState> {
+  const { getValidAccessTokenForShift } = await import("@/lib/google-oauth");
+  const tokens = await getValidAccessTokenForShift(shiftId);
+  if (!tokens?.accessToken) {
+    return {
+      kind: "not_connected",
+      source: "google",
+      message: "Google Calendar is not connected for this shift.",
+      events: [],
+    };
+  }
+  const calendarId = encodeURIComponent(tokens.calendarId || "primary");
+  const params = new URLSearchParams({
+    timeMin: `${timeMin}T00:00:00.000Z`,
+    timeMax: `${timeMax}T23:59:59.999Z`,
+    singleEvents: "true",
+    orderBy: "startTime",
+    maxResults: "100",
+  });
+  const res = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?${params}`,
+    { headers: { Authorization: `Bearer ${tokens.accessToken}` } },
+  );
+  if (res.status === 401 || res.status === 403) {
+    return {
+      kind: "login",
+      source: "google",
+      message: "Google Calendar authorization expired. Connect again.",
+      events: [],
+    };
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    return {
+      kind: "error",
+      source: "google",
+      message: `Google Calendar API error (${res.status}): ${text.slice(0, 160)}`,
+      events: [],
+    };
+  }
+  const data = (await res.json()) as { items?: unknown[] };
+  return {
+    kind: "ok",
+    source: "google",
+    events: parseCalendarEvents({ items: data.items ?? [] }, officers),
+  };
+}
+
+export async function createGoogleLeaveEventOAuth(input: {
+  shiftId: string;
+  summary: string;
+  description: string;
+  startDate: string;
+  endDate: string;
+}): Promise<{ ok: true; eventId: string } | { ok: false; message: string }> {
+  const { getValidAccessTokenForShift } = await import("@/lib/google-oauth");
+  const tokens = await getValidAccessTokenForShift(input.shiftId);
+  if (!tokens?.accessToken) {
+    return { ok: false, message: "Google Calendar is not connected for this shift." };
+  }
+  const calendarId = encodeURIComponent(tokens.calendarId || "primary");
+  const exclusiveEnd = addDays(input.endDate, 1);
+  const res = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tokens.accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        summary: input.summary,
+        description: input.description,
+        start: { date: input.startDate },
+        end: { date: exclusiveEnd },
+      }),
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    return { ok: false, message: `Could not write leave event (${res.status}): ${text.slice(0, 160)}` };
+  }
+  const data = (await res.json()) as { id?: string };
+  return { ok: true, eventId: data.id ?? `wb-${input.startDate}` };
+}
