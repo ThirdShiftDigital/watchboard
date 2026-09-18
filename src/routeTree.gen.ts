@@ -15,6 +15,9 @@ import { Route as AskRouteImport } from './routes/ask'
 import { Route as CalendarRouteImport } from './routes/calendar'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as ForgotRouteImport } from './routes/forgot'
+import { Route as HomeRouteImport } from './routes/home'
+import { Route as PrivacyRouteImport } from './routes/privacy'
+import { Route as TermsRouteImport } from './routes/terms'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as MeRouteImport } from './routes/me'
 import { Route as OnboardRouteImport } from './routes/onboard'
@@ -52,6 +55,21 @@ const DashboardRoute = DashboardRouteImport.update({
 const ForgotRoute = ForgotRouteImport.update({
   id: '/forgot',
   path: '/forgot',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HomeRoute = HomeRouteImport.update({
+  id: '/home',
+  path: '/home',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrivacyRoute = PrivacyRouteImport.update({
+  id: '/privacy',
+  path: '/privacy',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const TermsRoute = TermsRouteImport.update({
+  id: '/terms',
+  path: '/terms',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -102,6 +120,9 @@ export interface FileRoutesByFullPath {
   '/calendar': typeof CalendarRoute
   '/dashboard': typeof DashboardRoute
   '/forgot': typeof ForgotRoute
+  '/home': typeof HomeRoute
+  '/privacy': typeof PrivacyRoute
+  '/terms': typeof TermsRoute
   '/login': typeof LoginRoute
   '/me': typeof MeRoute
   '/onboard': typeof OnboardRoute
@@ -118,6 +139,9 @@ export interface FileRoutesByTo {
   '/calendar': typeof CalendarRoute
   '/dashboard': typeof DashboardRoute
   '/forgot': typeof ForgotRoute
+  '/home': typeof HomeRoute
+  '/privacy': typeof PrivacyRoute
+  '/terms': typeof TermsRoute
   '/login': typeof LoginRoute
   '/me': typeof MeRoute
   '/onboard': typeof OnboardRoute
@@ -135,6 +159,9 @@ export interface FileRoutesById {
   '/calendar': typeof CalendarRoute
   '/dashboard': typeof DashboardRoute
   '/forgot': typeof ForgotRoute
+  '/home': typeof HomeRoute
+  '/privacy': typeof PrivacyRoute
+  '/terms': typeof TermsRoute
   '/login': typeof LoginRoute
   '/me': typeof MeRoute
   '/onboard': typeof OnboardRoute
@@ -153,6 +180,9 @@ export interface FileRouteTypes {
     | '/calendar'
     | '/dashboard'
     | '/forgot'
+    | '/home'
+    | '/privacy'
+    | '/terms'
     | '/login'
     | '/me'
     | '/onboard'
@@ -169,6 +199,9 @@ export interface FileRouteTypes {
     | '/calendar'
     | '/dashboard'
     | '/forgot'
+    | '/home'
+    | '/privacy'
+    | '/terms'
     | '/login'
     | '/me'
     | '/onboard'
@@ -185,6 +218,9 @@ export interface FileRouteTypes {
     | '/calendar'
     | '/dashboard'
     | '/forgot'
+    | '/home'
+    | '/privacy'
+    | '/terms'
     | '/login'
     | '/me'
     | '/onboard'
@@ -202,6 +238,9 @@ export interface RootRouteChildren {
   CalendarRoute: typeof CalendarRoute
   DashboardRoute: typeof DashboardRoute
   ForgotRoute: typeof ForgotRoute
+  HomeRoute: typeof HomeRoute
+  PrivacyRoute: typeof PrivacyRoute
+  TermsRoute: typeof TermsRoute
   LoginRoute: typeof LoginRoute
   MeRoute: typeof MeRoute
   OnboardRoute: typeof OnboardRoute
@@ -254,6 +293,27 @@ declare module '@tanstack/react-router' {
       path: '/forgot'
       fullPath: '/forgot'
       preLoaderRoute: typeof ForgotRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/home': {
+      id: '/home'
+      path: '/home'
+      fullPath: '/home'
+      preLoaderRoute: typeof HomeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/privacy': {
+      id: '/privacy'
+      path: '/privacy'
+      fullPath: '/privacy'
+      preLoaderRoute: typeof PrivacyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/terms': {
+      id: '/terms'
+      path: '/terms'
+      fullPath: '/terms'
+      preLoaderRoute: typeof TermsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -322,6 +382,9 @@ const rootRouteChildren: RootRouteChildren = {
   CalendarRoute: CalendarRoute,
   DashboardRoute: DashboardRoute,
   ForgotRoute: ForgotRoute,
+  HomeRoute: HomeRoute,
+  PrivacyRoute: PrivacyRoute,
+  TermsRoute: TermsRoute,
   LoginRoute: LoginRoute,
   MeRoute: MeRoute,
   OnboardRoute: OnboardRoute,
