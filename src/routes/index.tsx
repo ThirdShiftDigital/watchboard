@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute, redirect } from "@tanstack/react-router";
 import { ArrowUpDown, Check, ChevronRight, Plus, RefreshCw, Share2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -20,6 +20,13 @@ import type { Officer, WatchRow } from "@/lib/types";
 import { sortWatchRows } from "@/lib/watch-text";
 
 export const Route = createFileRoute("/")({
+  beforeLoad: ({ context }) => {
+    // Signed-out visitors should hit login first — not the board's
+    // "Checking supervisor access…" gate.
+    if (!context.sessionUser) {
+      throw redirect({ to: "/login", search: { switch: false } });
+    }
+  },
   component: ZonesPage,
 });
 
