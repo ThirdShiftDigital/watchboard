@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, createFileRoute, redirect } from "@tanstack/react-router";
+import { Link, createFileRoute } from "@tanstack/react-router";
 import { ArrowUpDown, Check, ChevronRight, Plus, RefreshCw, Share2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AppShell, HeaderIconButton } from "@/components/app-shell";
+import { PublicHomePage } from "@/components/public-home";
 import { CalendarBanner } from "@/components/calendar-banner";
 import { DateBar } from "@/components/date-bar";
 import { SendSheet } from "@/components/send-sheet";
@@ -20,15 +21,26 @@ import type { Officer, WatchRow } from "@/lib/types";
 import { sortWatchRows } from "@/lib/watch-text";
 
 export const Route = createFileRoute("/")({
-  beforeLoad: ({ context }) => {
-    // Signed-out visitors should hit login first — not the board's
-    // "Checking supervisor access…" gate.
-    if (!context.sessionUser) {
-      throw redirect({ to: "/login", search: { switch: false } });
-    }
-  },
-  component: ZonesPage,
+  // Signed-out visitors get the public product homepage (Google brand
+  // verification needs a product page at /). Sign in still lives at /login.
+  component: IndexPage,
+  head: () => ({
+    meta: [
+      { title: "WatchBoard — Shift management for public safety" },
+      {
+        name: "description",
+        content:
+          "Zone assignments, sendable watch lists, days-off requests, and the leave calendar for the shift.",
+      },
+    ],
+  }),
 });
+
+function IndexPage() {
+  const { sessionUser } = Route.useRouteContext();
+  if (!sessionUser) return <PublicHomePage />;
+  return <ZonesPage />;
+}
 
 function ZonesPage() {
   const { date, setDate } = useWatchDate();
