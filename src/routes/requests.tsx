@@ -8,7 +8,7 @@ import { RequestForm } from "@/components/request-form";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatShort, formatStamp } from "@/lib/dates";
-import { createRequest, listRequests, setRequestStatus } from "@/lib/fns";
+import { cancelMyRequest, createRequest, listRequests, setRequestStatus } from "@/lib/fns";
 import { usePendingCount, useSupervisorReady } from "@/lib/hooks";
 import { formatRequestInvite } from "@/lib/watch-text";
 import { requestFormUrl, shareOrCopy } from "@/lib/share";
@@ -43,6 +43,20 @@ function RequestsPage() {
       } else if (vars.status === "denied") {
         toast.success("Removed from the calendar");
       }
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const cancelReq = useMutation({
+    mutationFn: (id: number) => cancelMyRequest({ data: { id } }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["requests"] }),
+        queryClient.invalidateQueries({ queryKey: ["watch"] }),
+        queryClient.invalidateQueries({ queryKey: ["schedule"] }),
+        queryClient.invalidateQueries({ queryKey: ["calendar"] }),
+      ]);
+      toast.success("Request cancelled");
     },
     onError: (err) => toast.error(err.message),
   });
@@ -103,6 +117,13 @@ function RequestsPage() {
               officerName={officers.find((o) => o.id === req.officerId)?.name ?? req.officerId}
               actions={
                 <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => cancelReq.mutate(req.id)}
+                  >
+                    Cancel
+                  </Button>
                   <Button
                     size="sm"
                     variant="secondary"

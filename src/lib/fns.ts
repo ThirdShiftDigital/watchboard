@@ -470,7 +470,9 @@ export const cancelMyRequest = createServerFn({ method: "POST" })
   .validator(z.object({ id: z.number().int() }))
   .handler(async ({ data, context }) => {
     const access = await accessFor(context.userId);
-    if (!access.officerId) {
+    const isSupervisor = Boolean(access.caps.approveRequests);
+    const isOwner = Boolean(access.officerId);
+    if (!isSupervisor && !isOwner) {
       throw new Error("Link your deputy profile before cancelling a request.");
     }
     const { getSql } = await import("@/lib/db");
@@ -484,7 +486,7 @@ export const cancelMyRequest = createServerFn({ method: "POST" })
     `;
     const row = existing[0];
     if (!row) throw new Error("Request not found.");
-    if (row.officer_id !== access.officerId) {
+    if (!isSupervisor && row.officer_id !== access.officerId) {
       throw new Error("You can only cancel your own requests.");
     }
     if (row.status !== "pending") {
