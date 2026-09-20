@@ -12,7 +12,7 @@ import { createRequest, listRequests, setRequestStatus } from "@/lib/fns";
 import { usePendingCount, useSupervisorReady } from "@/lib/hooks";
 import { formatRequestInvite } from "@/lib/watch-text";
 import { requestFormUrl, shareOrCopy } from "@/lib/share";
-import { kindLabel, type TimeOffRequest } from "@/lib/types";
+import { kindLabel, statusLabel, statusTone, type TimeOffRequest } from "@/lib/types";
 
 export const Route = createFileRoute("/requests")({ component: RequestsPage });
 
@@ -212,13 +212,7 @@ function RequestCard({
           ) : null}
           {req.reason ? <p className="mt-1 text-sm text-subtle">{req.reason}</p> : null}
         </div>
-        <Badge
-          tone={
-            req.status === "approved" ? "success" : req.status === "denied" ? "danger" : "warning"
-          }
-        >
-          {req.status}
-        </Badge>
+        <Badge tone={statusTone(req.status)}>{statusLabel(req.status)}</Badge>
       </div>
       {actions ? <div className="mt-3">{actions}</div> : null}
     </li>

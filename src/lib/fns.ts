@@ -123,7 +123,7 @@ async function loadRequests(shiftId: string) {
     join officers o on o.id = r.officer_id
     where o.shift_id = ${shiftId}
     order by
-      case r.status when 'pending' then 0 when 'approved' then 1 else 2 end,
+      case r.status when 'pending' then 0 when 'approved' then 1 when 'denied' then 2 else 3 end,
       r.created_at desc,
       r.id desc
   `;
@@ -463,6 +463,37 @@ export const setRequestStatus = createServerFn({ method: "POST" })
       `;
     }
     return { ok: true, startDate: row.start_date, endDate: row.end_date };
+  });
+
+export const cancelMyRequest = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ id: z.number().int() }))
+  .handler(async ({ data, context }) => {
+    const access = await accessFor(context.userId);
+    if (!access.officerId) {
+      throw new Error("Link your deputy profile before cancelling a request.");
+    }
+    const { getSql } = await import("@/lib/db");
+    const sql = await getSql();
+    const existing = await sql<RequestRow>`
+      select id, officer_id, start_date, end_date, kind, reason, status,
+             created_at::text as created_at, calendar_event_id
+      from time_off_requests
+      where id = ${data.id}
+      limit 1
+    `;
+    const row = existing[0];
+    if (!row) throw new Error("Request not found.");
+    if (row.officer_id !== access.officerId) {
+      throw new Error("You can only cancel your own requests.");
+    }
+    if (row.status !== "pending") {
+      throw new Error("Only pending requests can be cancelled.");
+    }
+    await sql`
+      update time_off_requests set status = 'cancelled' where id = ${data.id}
+    `;
+    return { ok: true as const };
   });
 
 export const callInLeave = createServerFn({ method: "POST" })
