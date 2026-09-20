@@ -119,10 +119,9 @@ function RequestsPage() {
                 <div className="flex gap-2">
                   <Button
                     size="sm"
-                    variant="ghost"
-                    onClick={() => cancelReq.mutate(req.id)}
+                    onClick={() => setStatus.mutate({ id: req.id, status: "approved" })}
                   >
-                    Cancel
+                    Approve
                   </Button>
                   <Button
                     size="sm"
@@ -133,9 +132,10 @@ function RequestsPage() {
                   </Button>
                   <Button
                     size="sm"
-                    onClick={() => setStatus.mutate({ id: req.id, status: "approved" })}
+                    variant="ghost"
+                    onClick={() => cancelReq.mutate(req.id)}
                   >
-                    Approve
+                    Cancel
                   </Button>
                 </div>
               }
