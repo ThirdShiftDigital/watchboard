@@ -124,8 +124,7 @@ async function loadRequests(shiftId: string) {
     where o.shift_id = ${shiftId}
     order by
       case r.status when 'pending' then 0 when 'approved' then 1 when 'denied' then 2 else 3 end,
-      r.start_date asc,
-      r.end_date asc,
+      r.created_at asc,
       r.id asc
   `;
   return rows.map(mapRequest);
