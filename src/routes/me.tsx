@@ -13,11 +13,11 @@ import { RedirectToSignIn, UserButton } from "@/lib/auth/gates";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { cn } from "@/lib/cn";
 import { addDays, formatLong, formatShort, formatStamp, startOfWeek, todayISO } from "@/lib/dates";
-import { createRequest, getOfficerPortal } from "@/lib/fns";
+import { cancelMyRequest, createRequest, getOfficerPortal } from "@/lib/fns";
 import { useMyAccess } from "@/lib/hooks";
 import { useOfficerSession } from "@/lib/officer-session";
 import { linkMyOfficer } from "@/lib/staff";
-import { WEEKDAY_SHORT, kindLabel, rdoLabel, zoneHint } from "@/lib/types";
+import { WEEKDAY_SHORT, kindLabel, rdoLabel, statusLabel, statusTone, zoneHint } from "@/lib/types";
 import { statusForOfficer } from "@/lib/watch-logic";
 
 export const Route = createFileRoute("/me")({ component: OfficerPage });
@@ -77,6 +77,16 @@ function OfficerPage() {
     await queryClient.invalidateQueries({ queryKey: ["officer-portal"] });
     setRequesting(false);
     toast.success("Request submitted — waiting on a supervisor");
+  }
+
+  async function cancelRequest(id: number) {
+    try {
+      await cancelMyRequest({ data: { id } });
+      await queryClient.invalidateQueries({ queryKey: ["officer-portal"] });
+      toast.success("Request cancelled");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not cancel request");
+    }
   }
 
   async function chooseOfficer(id: string) {
@@ -271,17 +281,20 @@ function OfficerPage() {
                           {r.createdAt ? ` · ${formatStamp(r.createdAt)}` : ""}
                         </span>
                       </span>
-                      <Badge
-                        tone={
-                          r.status === "approved"
-                            ? "success"
-                            : r.status === "denied"
-                              ? "danger"
-                              : "warning"
-                        }
-                      >
-                        {r.status}
-                      </Badge>
+                      <span className="flex shrink-0 items-center gap-2">
+                        <Badge tone={statusTone(r.status)}>{statusLabel(r.status)}</Badge>
+                        {r.status === "pending" ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 px-2 text-xs text-muted"
+                            onClick={() => void cancelRequest(r.id)}
+                          >
+                            Cancel
+                          </Button>
+                        ) : null}
+                      </span>
                     </li>
                   ))}
                 </ul>

@@ -42,7 +42,7 @@ export const REQUEST_KINDS = [
 ] as const;
 
 export type RequestKind = (typeof REQUEST_KINDS)[number]["id"];
-export type RequestStatus = "pending" | "approved" | "denied";
+export type RequestStatus = "pending" | "approved" | "denied" | "cancelled";
 export type DutyStatus = "working" | "rdo" | "leave" | "calendar";
 export type OfficerRole = (typeof ROLES)[number]["id"];
 
@@ -231,6 +231,39 @@ export function roleLabel(role: OfficerRole): string {
 
 export function kindLabel(kind: RequestKind): string {
   return REQUEST_KINDS.find((k) => k.id === kind)?.label ?? kind;
+}
+
+
+export function statusLabel(status: RequestStatus): string {
+  switch (status) {
+    case "pending":
+      return "Pending";
+    case "approved":
+      return "Approved";
+    case "denied":
+      return "Denied";
+    case "cancelled":
+      return "Cancelled";
+    default:
+      return status;
+  }
+}
+
+export function statusTone(
+  status: RequestStatus,
+): "success" | "danger" | "warning" | "neutral" {
+  switch (status) {
+    case "approved":
+      return "success";
+    case "denied":
+      return "danger";
+    case "pending":
+      return "warning";
+    case "cancelled":
+      return "neutral";
+    default:
+      return "neutral";
+  }
 }
 
 export function kindShort(kind: RequestKind): string {
