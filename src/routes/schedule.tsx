@@ -56,6 +56,7 @@ function SchedulePage() {
   const [form, setForm] = useState<"new" | Officer | null>(null);
   const [printOpen, setPrintOpen] = useState(false);
   const [callIn, setCallIn] = useState(false);
+  const [rdoOnly, setRdoOnly] = useState(false);
   const today = todayISO();
 
   const scheduleQuery = useQuery({
@@ -78,11 +79,14 @@ function SchedulePage() {
   const requests = data?.requests ?? [];
   const events = data?.calendar.events ?? [];
   const minWorking = data?.minWorking ?? 10;
+  // RDO-only: ignore approved leave + Google Calendar matches — standing RDO pattern only.
+  const viewRequests = rdoOnly ? [] : requests;
+  const viewEvents = rdoOnly ? [] : events;
 
   const counts = WEEKDAY_SHORT.map((_, weekday) => {
     const iso = addDays(weekStart, weekday);
     return officers.filter((o) => {
-      return statusForOfficer(o, weekday, iso, requests, events).status === "working";
+      return statusForOfficer(o, weekday, iso, viewRequests, viewEvents).status === "working";
     }).length;
   });
 
@@ -174,7 +178,7 @@ function SchedulePage() {
         </HeaderIconButton>
       </div>
 
-      {data ? <CalendarBanner calendar={data.calendar} /> : null}
+      {data && !rdoOnly ? <CalendarBanner calendar={data.calendar} /> : null}
 
       <div className="grid grid-cols-7 border-b border-border bg-card-2 px-2 py-2 md:px-3">
         {WEEKDAY_SHORT.map((label, i) => {
@@ -211,12 +215,23 @@ function SchedulePage() {
         <span className="inline-flex items-center gap-1.5">
           <span className="size-2.5 rounded-xs bg-rdo" /> RDO
         </span>
-        <span className="inline-flex items-center gap-1.5">
-          <span className="size-2.5 rounded-xs bg-destructive/40" /> Leave
-        </span>
+        {!rdoOnly ? (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="size-2.5 rounded-xs bg-destructive/40" /> Leave
+          </span>
+        ) : null}
         <span className="inline-flex items-center gap-1.5">
           <span className="size-2.5 rounded-xs bg-card-2 ring-1 ring-border" /> On duty
         </span>
+        <label className="inline-flex items-center gap-2 text-micro uppercase tracking-wide text-foreground">
+          <input
+            type="checkbox"
+            checked={rdoOnly}
+            onChange={(e) => setRdoOnly(e.target.checked)}
+            className="size-4 accent-primary"
+          />
+          RDOs only
+        </label>
         <label className="ml-auto inline-flex items-center gap-2 text-micro uppercase tracking-wide">
           Min working
           <input
@@ -264,8 +279,8 @@ function SchedulePage() {
             officer={officer}
             weekStart={weekStart}
             today={today}
-            requests={requests}
-            events={events}
+            requests={viewRequests}
+            events={viewEvents}
             onEdit={() => setForm(officer)}
             onToggle={(weekday) => toggle.mutate({ officerId: officer.id, weekday })}
           />
@@ -279,8 +294,8 @@ function SchedulePage() {
             officer={officer}
             weekStart={weekStart}
             today={today}
-            requests={requests}
-            events={events}
+            requests={viewRequests}
+            events={viewEvents}
             onEdit={() => setForm(officer)}
             onToggle={(weekday) => toggle.mutate({ officerId: officer.id, weekday })}
           />
