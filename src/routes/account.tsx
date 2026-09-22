@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/cn";
+import { formatStamp } from "@/lib/dates";
 import { PERMISSIONS, assignablePermissions, permissionHint, permissionLabel, type Permission } from "@/lib/access";
 import { useMyAccess, usePendingCount } from "@/lib/hooks";
 import {
@@ -164,6 +165,11 @@ function AccountPage() {
                           <p className={cn("truncate text-2xs", on ? "text-primary-foreground/80" : "text-muted")}>
                             {permissionLabel(person.permission)} · {person.email}
                           </p>
+                          <p className={cn("truncate text-2xs", on ? "text-primary-foreground/70" : "text-subtle")}>
+                            {person.lastLoginAt
+                              ? `Last login ${formatStamp(person.lastLoginAt)}`
+                              : "Never signed in"}
+                          </p>
                         </button>
                       </li>
                     );
@@ -231,6 +237,7 @@ function PersonDetail({
     permission: Permission;
     officerId: string | null;
     shiftId: string | null;
+    lastLoginAt?: string | null;
   };
   mineId: string;
   allowed: Permission[];
@@ -245,6 +252,12 @@ function PersonDetail({
         <div>
           <p className="font-display text-xl font-semibold uppercase tracking-wide">{person.name}</p>
           <p className="text-xs text-muted">{person.email}</p>
+          <p className="mt-1 text-2xs uppercase tracking-wide text-muted">
+            Last login
+            <span className="ml-2 normal-case tracking-normal text-foreground">
+              {person.lastLoginAt ? formatStamp(person.lastLoginAt) : "Never"}
+            </span>
+          </p>
         </div>
         <Badge tone={person.permission === "captain" || person.permission === "admin" ? "success" : "neutral"}>
           {permissionLabel(person.permission)}

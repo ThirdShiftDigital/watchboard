@@ -694,8 +694,26 @@ export const listStaff = createServerFn({ method: "POST" })
         `
       : [];
     const shifts = await listShiftRows(agencyId);
+    const userIds = people.map((p) => p.user_id);
+    const loginRows =
+      userIds.length > 0
+        ? await sql.query<{ user_id: string; last_login: string | null }>(
+            `select "userId" as user_id,
+                    to_char(max("createdAt") at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as last_login
+             from "session"
+             where "userId" = any($1::text[])
+             group by "userId"`,
+            [userIds],
+          )
+        : [];
+    const lastLoginByUser = new Map(
+      loginRows.map((r) => [r.user_id, r.last_login] as const),
+    );
     return {
-      people: people.map(mapStaff),
+      people: people.map((p) => ({
+        ...mapStaff(p),
+        lastLoginAt: lastLoginByUser.get(p.user_id) ?? null,
+      })),
       resets: resets
         .filter((r) => emails.includes(r.email.toLowerCase()))
         .map((r) => ({
