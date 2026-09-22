@@ -180,21 +180,45 @@ export async function activeShiftIdFor(userId: string): Promise<string> {
     agency_id: string | null;
     viewing_agency_id: string | null;
     is_owner: boolean | null;
+    permission: string | null;
   }>`
-    select active_shift_id, shift_id, agency_id, viewing_agency_id, is_owner
+    select active_shift_id, shift_id, agency_id, viewing_agency_id, is_owner, permission
     from staff_accounts where user_id = ${userId}
   `;
-  const agencyId = rows[0]?.is_owner
-    ? rows[0]?.viewing_agency_id
-    : rows[0]?.agency_id;
-  const preferred = rows[0]?.active_shift_id || rows[0]?.shift_id;
+  const staff = rows[0];
+  const agencyId = staff?.is_owner ? staff?.viewing_agency_id : staff?.agency_id;
+  // Division leaders / owners may browse shifts via active_shift_id.
+  // Everyone else must stay on their home shift_id so a stale active pointer
+  // (or "oldest shift" fallback) cannot show them another watch's board.
+  const canBrowseShifts =
+    Boolean(staff?.is_owner) || staff?.permission === "captain";
+  const preferred = canBrowseShifts
+    ? staff?.active_shift_id || staff?.shift_id
+    : staff?.shift_id || staff?.active_shift_id;
   if (preferred) {
     const exists = agencyId
       ? await sql<{ id: string }>`
           select id from shifts where id = ${preferred} and agency_id = ${agencyId}
         `
       : await sql<{ id: string }>`select id from shifts where id = ${preferred}`;
-    if (exists[0]) return exists[0].id;
+    if (exists[0]) {
+      const id = exists[0].id;
+      // Heal stale active_shift_id for non-browsers so Accounts + schedule agree.
+      if (
+        !canBrowseShifts &&
+        staff?.shift_id &&
+        staff.shift_id === id &&
+        staff.active_shift_id &&
+        staff.active_shift_id !== id
+      ) {
+        await sql`
+          update staff_accounts
+          set active_shift_id = ${id}
+          where user_id = ${userId}
+        `;
+      }
+      return id;
+    }
   }
   if (agencyId) {
     const first = await sql<{ id: string }>`
@@ -273,7 +297,7 @@ export const switchShift = createServerFn({ method: "POST" })
     }
     if (!access.caps.manageAgency && !access.caps.managePlatform) {
       const home = access.shiftId || access.activeShiftId;
-      if (home && shift.id !== home && shift.id !== access.activeShiftId) {
+      if (home && shift.id !== home) {
         throw new Error("You can only work your own shift.");
       }
     }

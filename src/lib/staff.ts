@@ -834,7 +834,7 @@ export const setStaffPermission = createServerFn({ method: "POST" })
       set permission = ${data.permission},
           officer_id = ${officerId},
           shift_id = ${nextShift},
-          active_shift_id = coalesce(${nextShift}, active_shift_id)
+          active_shift_id = ${nextShift}
       where user_id = ${data.userId}
     `;
     if (target.agencyId) {
