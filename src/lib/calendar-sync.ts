@@ -134,6 +134,14 @@ async function recentCalendarCache(
   return cached;
 }
 
+/** DB-only leave events for Save — no Google/ICS round-trip. */
+export async function peekCalendarCache(
+  shiftId: string,
+  officers: Officer[],
+): Promise<CalendarEvent[]> {
+  return loadCache(shiftId, officers);
+}
+
 export async function loadShiftCalendar(input: {
   shift: Pick<Shift, "id" | "calendarFeedUrl" | "googleCalendar">;
   officers: Officer[];
@@ -142,6 +150,15 @@ export async function loadShiftCalendar(input: {
   canConnect: boolean;
 }): Promise<CalendarState> {
   const { shift, officers, timeMin, timeMax, canConnect } = input;
+
+  // Google cache first — Zones Save/refetch must not wait on ICS when fresh.
+  if (shift.googleCalendar) {
+    const fresh = await recentCalendarCache(shift.id, officers);
+    if (fresh) {
+      return { kind: "ok", source: "google", events: fresh };
+    }
+  }
+
   let ics: CalendarState | null = null;
   if (shift.calendarFeedUrl) {
     ics = await fetchIcs(shift.calendarFeedUrl, officers, timeMin, timeMax);
@@ -156,16 +173,6 @@ export async function loadShiftCalendar(input: {
         ? "Connect Google Calendar to pull leave and write approved days off."
         : "No leave calendar is linked yet.",
       events: [],
-    };
-  }
-
-  // Serve a fresh-enough cache so Zones / Schedule stay snappy.
-  const fresh = await recentCalendarCache(shift.id, officers);
-  if (fresh) {
-    return {
-      kind: "ok",
-      source: "google",
-      events: mergeEvents(fresh, ics?.kind === "ok" ? ics.events : []),
     };
   }
 

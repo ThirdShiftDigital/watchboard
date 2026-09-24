@@ -21,6 +21,7 @@ import {
   connectShiftGoogle,
   disconnectShiftGoogle,
   loadShiftCalendar,
+  peekCalendarCache,
   removeApprovedLeave,
   writeApprovedLeave,
 } from "@/lib/calendar-sync";
@@ -269,13 +270,16 @@ export const upsertAssignment = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     await requireCap(context.userId, "editWatch");
     const shift = await currentShiftFor(context.userId);
-    const officers = await loadOfficers(shift.id);
+    // Duty gate from DB only — Save must not wait on Google/ICS.
+    const [officers, requests] = await Promise.all([
+      loadOfficers(shift.id),
+      loadRequests(shift.id),
+    ]);
     const officer = officers.find((o) => o.id === data.officerId);
     if (!officer) throw new Error("That officer is not on this shift’s schedule.");
     const weekday = weekdayOf(data.date);
-    const requests = await loadRequests(shift.id);
-    const calendar = await fetchCalendar(officers, data.date, data.date, shift, true);
-    const duty = statusForOfficer(officer, weekday, data.date, requests, calendar.events);
+    const events = await peekCalendarCache(shift.id, officers);
+    const duty = statusForOfficer(officer, weekday, data.date, requests, events);
     if (duty.status !== "working") {
       throw new Error("Zones only assign people working today on the schedule.");
     }
