@@ -54,7 +54,8 @@ export function PickerSheet({
         {searchable ? (
           <div className="px-4 pt-3">
             <Input
-              autoFocus
+              // Autofocus opens the mobile keyboard and feels like a hang on short lists.
+              autoFocus={options.length > 12}
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder={searchPlaceholder}
