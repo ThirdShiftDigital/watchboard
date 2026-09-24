@@ -11,6 +11,8 @@ import { normalizeFeedUrl, parseIcsEvents } from "@/lib/ics";
 import { kindLabel, type CalendarEvent, type CalendarState, type Officer, type RequestKind, type Shift } from "@/lib/types";
 import { matchOfficersToEvent } from "@/lib/watch-logic";
 
+const CALENDAR_CACHE_TTL_MS = 5 * 60 * 1000;
+
 type CacheRow = {
   event_id: string;
   title: string;
@@ -46,17 +48,23 @@ async function saveCache(shiftId: string, events: CalendarEvent[]) {
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
   await sql`delete from calendar_cache where shift_id = ${shiftId}`;
-  for (const event of events.slice(0, 200)) {
-    await sql`
-      insert into calendar_cache (shift_id, event_id, title, start_at, end_at, all_day)
-      values (${shiftId}, ${event.id}, ${event.title}, ${event.start}, ${event.end}, ${event.allDay})
-      on conflict (shift_id, event_id) do update set
-        title = excluded.title,
-        start_at = excluded.start_at,
-        end_at = excluded.end_at,
-        all_day = excluded.all_day
-    `;
-  }
+  const batch = events.slice(0, 200);
+  await Promise.all(
+    batch.map(
+      (event) => sql`
+        insert into calendar_cache (shift_id, event_id, title, start_at, end_at, all_day)
+        values (${shiftId}, ${event.id}, ${event.title}, ${event.start}, ${event.end}, ${event.allDay})
+        on conflict (shift_id, event_id) do update set
+          title = excluded.title,
+          start_at = excluded.start_at,
+          end_at = excluded.end_at,
+          all_day = excluded.all_day
+      `,
+    ),
+  );
+  await sql`
+    update shifts set calendar_synced_at = now() where id = ${shiftId}
+  `;
 }
 
 function mergeEvents(primary: CalendarEvent[], extra: CalendarEvent[]): CalendarEvent[] {
@@ -105,6 +113,28 @@ async function fetchIcs(
   }
 }
 
+async function recentCalendarCache(
+  shiftId: string,
+  officers: Officer[],
+): Promise<CalendarEvent[] | null> {
+  const cached = await loadCache(shiftId, officers);
+  if (!cached.length) return null;
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const meta = await sql<{ synced: string | null }>`
+    select calendar_synced_at::text as synced from shifts where id = ${shiftId}
+  `;
+  const synced = meta[0]?.synced ? Date.parse(meta[0].synced) : NaN;
+  // Missing stamp: treat existing rows as fresh once so we do not pay Google
+  // on the first load after this deploy.
+  if (!Number.isFinite(synced)) {
+    await sql`update shifts set calendar_synced_at = now() where id = ${shiftId}`;
+    return cached;
+  }
+  if (Date.now() - synced > CALENDAR_CACHE_TTL_MS) return null;
+  return cached;
+}
+
 export async function loadShiftCalendar(input: {
   shift: Pick<Shift, "id" | "calendarFeedUrl" | "googleCalendar">;
   officers: Officer[];
@@ -127,6 +157,16 @@ export async function loadShiftCalendar(input: {
         ? "Connect Google Calendar to pull leave and write approved days off."
         : "No leave calendar is linked yet.",
       events: [],
+    };
+  }
+
+  // Serve a fresh-enough cache so Zones / Schedule stay snappy.
+  const fresh = await recentCalendarCache(shift.id, officers);
+  if (fresh) {
+    return {
+      kind: "ok",
+      source: "google",
+      events: mergeEvents(fresh, ics?.kind === "ok" ? ics.events : []),
     };
   }
 

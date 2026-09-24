@@ -12,6 +12,10 @@ import {
 
 export const DEFAULT_SHIFT_ID = "first-shift";
 
+// Schema + roster seeds are expensive; skip after the first success in this process.
+let shiftsEnsured = false;
+let shiftsEnsureInFlight: Promise<void> | null = null;
+
 type ShiftRow = {
   id: string;
   name: string;
@@ -49,6 +53,9 @@ export function mapShift(row: ShiftRow): Shift {
 }
 
 export async function ensureShifts() {
+  if (shiftsEnsured) return;
+  if (shiftsEnsureInFlight) return shiftsEnsureInFlight;
+  shiftsEnsureInFlight = (async () => {
   await ensureTables();
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
@@ -75,6 +82,7 @@ export async function ensureShifts() {
   await sql.query(`alter table shifts add column if not exists google_token_expiry text`);
   await sql.query(`alter table shifts add column if not exists google_calendar_id text`);
   await sql.query(`alter table shifts add column if not exists google_connected_by text`);
+  await sql.query(`alter table shifts add column if not exists calendar_synced_at timestamptz`);
   await sql.query(`
     create table if not exists calendar_cache (
       shift_id   text not null,
@@ -136,6 +144,13 @@ export async function ensureShifts() {
     await seedThirdShiftRoster();
   } catch (err) {
     console.error("[ensureShifts] third-shift roster seed failed", err);
+  }
+  shiftsEnsured = true;
+  })();
+  try {
+    await shiftsEnsureInFlight;
+  } finally {
+    shiftsEnsureInFlight = null;
   }
 }
 

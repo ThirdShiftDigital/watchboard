@@ -174,12 +174,12 @@ export const getWatch = createServerFn({ method: "POST" })
     const shift = await currentShiftFor(context.userId);
     const date = data.date;
     const weekday = weekdayOf(date);
-    const [officers, requests, existing] = await Promise.all([
+    const [officers, requests, existing, access] = await Promise.all([
       loadOfficers(shift.id),
       loadRequests(shift.id),
       loadAssignments(date, shift.id),
+      accessFor(context.userId),
     ]);
-    const access = await accessFor(context.userId);
     const calendar = await fetchCalendar(officers, date, date, shift, access.caps.editWatch);
     let assignments = existing;
     let rows = buildRows(officers, weekday, date, requests, calendar.events, assignments);
@@ -190,12 +190,11 @@ export const getWatch = createServerFn({ method: "POST" })
     if (stale.length) {
       const { getSql } = await import("@/lib/db");
       const sql = await getSql();
-      for (const a of stale) {
-        await sql`
-          delete from zone_assignments
-          where date = ${a.date} and officer_id = ${a.officerId}
-        `;
-      }
+      const staleIds = stale.map((a) => a.officerId);
+      await sql`
+        delete from zone_assignments
+        where date = ${date} and officer_id = any(${staleIds}::text[])
+      `;
       assignments = assignments.filter((a) => workingIds.has(a.officerId));
       rows = buildRows(officers, weekday, date, requests, calendar.events, assignments);
     }
