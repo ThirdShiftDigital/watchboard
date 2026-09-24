@@ -89,15 +89,23 @@ main().catch((err) => {
   // Netlify build machines often cannot reach Supabase direct (IPv6) hosts.
   // Don't fail the whole deploy — apply SQL via Supabase SQL editor / pooler URL.
   const code = err?.code;
+  const message = String(err?.message || err || "");
+  const poolExhausted =
+    /EMAXCONNSESSION|max clients reached|remaining connection slots/i.test(message) ||
+    code === "53300" || // too_many_connections
+    code === "57P03"; // cannot_connect_now
   if (
     code === "ENETUNREACH" ||
     code === "EHOSTUNREACH" ||
     code === "ENOTFOUND" ||
     code === "ECONNREFUSED" ||
-    code === "ETIMEDOUT"
+    code === "ETIMEDOUT" ||
+    poolExhausted
   ) {
     console.error(
-      "[migrate] network error talking to DATABASE_URL — continuing build. Use a Supabase pooler URI (IPv4) for Netlify, and/or apply migrations in the Supabase SQL editor.",
+      poolExhausted
+        ? "[migrate] database pool exhausted (session mode) — continuing build. Cap app pool clients and/or switch DATABASE_URL to the transaction pooler (:6543)."
+        : "[migrate] network error talking to DATABASE_URL — continuing build. Use a Supabase pooler URI (IPv4) for Netlify, and/or apply migrations in the Supabase SQL editor.",
     );
     process.exit(0);
   }
