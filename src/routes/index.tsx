@@ -17,7 +17,7 @@ import { deleteAssignment, getWatch, rebuildWatch, setZoneOrder, upsertAssignmen
 import { useMyAccess, usePendingCount, useSupervisorReady } from "@/lib/hooks";
 import { useWatchDate } from "@/lib/store";
 import { DEFAULT_ZONE_ORDER, zoneHint } from "@/lib/types";
-import type { Officer, WatchRow } from "@/lib/types";
+import type { Officer, WatchBoard, WatchRow } from "@/lib/types";
 import { sortWatchRows } from "@/lib/watch-text";
 
 export const Route = createFileRoute("/")({
@@ -71,22 +71,61 @@ function ZonesPage() {
   const save = useMutation({
     mutationFn: (input: { officerId: string; zone: string }) =>
       upsertAssignment({ data: { date, ...input } }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["watch", date] });
+    onMutate: async (input) => {
+      // Close form immediately — do not wait on network/refetch.
       setForm(null);
-      toast.success("Zone saved");
+      await queryClient.cancelQueries({ queryKey: ["watch", date] });
+      const previous = queryClient.getQueryData<WatchBoard>(["watch", date]);
+      if (previous) {
+        const rows = previous.rows.map((r) =>
+          r.officer.id === input.officerId && r.status === "working"
+            ? { ...r, zone: input.zone }
+            : r,
+        );
+        queryClient.setQueryData<WatchBoard>(["watch", date], {
+          ...previous,
+          rows,
+          assignedCount: rows.filter((r) => r.status === "working" && r.zone).length,
+        });
+      }
+      return { previous };
     },
-    onError: (err) => toast.error(err.message),
+    onError: (err, _input, ctx) => {
+      if (ctx?.previous) queryClient.setQueryData(["watch", date], ctx.previous);
+      toast.error(err.message);
+    },
+    onSuccess: () => {
+      toast.success("Zone saved");
+      void queryClient.invalidateQueries({ queryKey: ["watch", date] });
+    },
   });
 
   const remove = useMutation({
     mutationFn: (officerId: string) => deleteAssignment({ data: { date, officerId } }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["watch", date] });
+    onMutate: async (officerId) => {
       setForm(null);
-      toast.success("Assignment cleared");
+      await queryClient.cancelQueries({ queryKey: ["watch", date] });
+      const previous = queryClient.getQueryData<WatchBoard>(["watch", date]);
+      if (previous) {
+        const rows = previous.rows.map((r) =>
+          r.officer.id === officerId && r.status === "working" ? { ...r, zone: null } : r,
+        );
+        queryClient.setQueryData<WatchBoard>(["watch", date], {
+          ...previous,
+          rows,
+          assignedCount: rows.filter((r) => r.status === "working" && r.zone).length,
+        });
+      }
+      return { previous };
     },
-    onError: (err) => toast.error(err.message),
+    onError: (err, _input, ctx) => {
+      if (ctx?.previous) queryClient.setQueryData(["watch", date], ctx.previous);
+      toast.error(err.message);
+    },
+    onSuccess: () => {
+      toast.success("Assignment cleared");
+      void queryClient.invalidateQueries({ queryKey: ["watch", date] });
+    },
   });
 
   const orderSave = useMutation({
