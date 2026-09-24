@@ -48,20 +48,19 @@ async function saveCache(shiftId: string, events: CalendarEvent[]) {
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
   await sql`delete from calendar_cache where shift_id = ${shiftId}`;
-  const batch = events.slice(0, 200);
-  await Promise.all(
-    batch.map(
-      (event) => sql`
-        insert into calendar_cache (shift_id, event_id, title, start_at, end_at, all_day)
-        values (${shiftId}, ${event.id}, ${event.title}, ${event.start}, ${event.end}, ${event.allDay})
-        on conflict (shift_id, event_id) do update set
-          title = excluded.title,
-          start_at = excluded.start_at,
-          end_at = excluded.end_at,
-          all_day = excluded.all_day
-      `,
-    ),
-  );
+  // Sequential writes — parallel inserts grab many pool clients and trip
+  // Supabase session-mode EMAXCONNSESSION (pool_size often 15).
+  for (const event of events.slice(0, 200)) {
+    await sql`
+      insert into calendar_cache (shift_id, event_id, title, start_at, end_at, all_day)
+      values (${shiftId}, ${event.id}, ${event.title}, ${event.start}, ${event.end}, ${event.allDay})
+      on conflict (shift_id, event_id) do update set
+        title = excluded.title,
+        start_at = excluded.start_at,
+        end_at = excluded.end_at,
+        all_day = excluded.all_day
+    `;
+  }
   await sql`
     update shifts set calendar_synced_at = now() where id = ${shiftId}
   `;
