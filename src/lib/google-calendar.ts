@@ -280,7 +280,7 @@ async function describeGoogleWriteError(res: Response): Promise<CalendarWriteFai
       ok: false,
       reason: "no_access",
       message:
-        "the connected Google account has view-only access to this calendar. Ask the owner to share it with “Make changes to events”.",
+        `the Google account connected to this shift can’t edit this calendar (view-only). Share it with that account using “Make changes to events”, or reconnect with an account that can edit it.${googleMessage ? ` Google said: ${googleMessage}` : ""}`,
     };
   }
   if (res.status === 403 && /insufficient.*(scope|permission)/i.test(googleMessage)) {
