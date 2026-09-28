@@ -5,12 +5,11 @@ import {
   deleteGoogleLeaveEventOAuth,
   fetchGoogleCalendar,
   fetchGoogleCalendarOAuth,
-  leaveEventTitle,
   type CalendarWriteFailure,
 } from "@/lib/google-calendar";
 import { getConnectorAccessToken } from "@/lib/app-data/client.server";
 import { normalizeFeedUrl, parseIcsEvents } from "@/lib/ics";
-import { kindLabel, type CalendarEvent, type CalendarState, type Officer, type RequestKind, type Shift } from "@/lib/types";
+import type { CalendarEvent, CalendarState, Officer, Shift } from "@/lib/types";
 import { matchOfficersToEvent } from "@/lib/watch-logic";
 
 const CALENDAR_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -390,8 +389,8 @@ export type LeaveCalendarWrite =
 export async function writeApprovedLeave(input: {
   shiftId: string;
   googleCalendar: boolean;
-  lastName: string;
-  kind: RequestKind;
+  /** Event title, e.g. "ANDERSON - VACATION" (see leaveEventSummary). */
+  summary: string;
   startDate: string;
   endDate: string;
   reason: string;
@@ -403,7 +402,7 @@ export async function writeApprovedLeave(input: {
       message: "Google Calendar is not connected for this shift.",
     };
   }
-  const summary = leaveEventTitle(input.lastName, kindLabel(input.kind));
+  const summary = input.summary;
   // Standalone OAuth (Netlify) — tokens + selected calendar live on the shift.
   const oauthWritten = await createGoogleLeaveEventOAuth({
     shiftId: input.shiftId,
