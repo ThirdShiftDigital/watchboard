@@ -8,7 +8,7 @@ import { RequestForm } from "@/components/request-form";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatShort, formatStamp } from "@/lib/dates";
-import { cancelMyRequest, createRequest, listRequests, setRequestStatus } from "@/lib/fns";
+import { cancelMyRequest, createRequest, listRequests, retryLeaveCalendar, setRequestStatus } from "@/lib/fns";
 import { usePendingCount, useSupervisorReady } from "@/lib/hooks";
 import { formatRequestInvite } from "@/lib/watch-text";
 import { requestFormUrl, shareOrCopy } from "@/lib/share";
@@ -31,18 +31,50 @@ function RequestsPage() {
   const setStatus = useMutation({
     mutationFn: (input: { id: number; status: "approved" | "denied" | "pending" }) =>
       setRequestStatus({ data: input }),
-    onSuccess: async (_data, vars) => {
+    onSuccess: async (data, vars) => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["requests"] }),
         queryClient.invalidateQueries({ queryKey: ["watch"] }),
         queryClient.invalidateQueries({ queryKey: ["schedule"] }),
         queryClient.invalidateQueries({ queryKey: ["calendar"] }),
       ]);
+      const cal = data.calendar;
       if (vars.status === "approved") {
-        toast.success("Approved — filled on the calendar and dropped from the watch");
+        if (cal.message) {
+          toast.warning(`Approved, but couldn’t add to Google Calendar: ${cal.message}`, {
+            duration: 12_000,
+          });
+        } else if (cal.written) {
+          toast.success("Approved — added to Google Calendar and dropped from the watch");
+        } else {
+          toast.success("Approved — filled on the calendar and dropped from the watch");
+        }
       } else if (vars.status === "denied") {
-        toast.success("Removed from the calendar");
+        if (cal.message) {
+          toast.warning(`Removed, but couldn’t delete the Google Calendar event: ${cal.message}`, {
+            duration: 12_000,
+          });
+        } else {
+          toast.success("Removed from the calendar");
+        }
       }
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const retryCal = useMutation({
+    mutationFn: (id: number) => retryLeaveCalendar({ data: { id } }),
+    onSuccess: async (data) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["requests"] }),
+        queryClient.invalidateQueries({ queryKey: ["calendar"] }),
+      ]);
+      if (data.calendar.written) toast.success("Added to Google Calendar");
+      else
+        toast.warning(
+          `Couldn’t add to Google Calendar: ${data.calendar.message ?? "unknown error"}`,
+          { duration: 12_000 },
+        );
     },
     onError: (err) => toast.error(err.message),
   });
@@ -156,13 +188,26 @@ function RequestsPage() {
               officerName={officers.find((o) => o.id === req.officerId)?.name ?? req.officerId}
               actions={
                 req.status === "approved" ? (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => setStatus.mutate({ id: req.id, status: "denied" })}
-                  >
-                    Remove from calendar
-                  </Button>
+                  <div className="flex flex-wrap gap-2">
+                    {q.data?.googleCalendar && !req.calendarEventId ? (
+                      <Button
+                        size="sm"
+                        disabled={retryCal.isPending}
+                        onClick={() => retryCal.mutate(req.id)}
+                      >
+                        {retryCal.isPending && retryCal.variables === req.id
+                          ? "Adding…"
+                          : "Add to Google Calendar"}
+                      </Button>
+                    ) : null}
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => setStatus.mutate({ id: req.id, status: "denied" })}
+                    >
+                      Remove from calendar
+                    </Button>
+                  </div>
                 ) : req.status === "denied" ? (
                   <Button
                     size="sm"

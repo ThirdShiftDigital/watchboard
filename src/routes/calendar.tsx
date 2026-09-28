@@ -101,7 +101,7 @@ function CalendarPage() {
 
   async function removeLeave(id: number, name: string) {
     try {
-      await setRequestStatus({ data: { id, status: "denied" } });
+      const result = await setRequestStatus({ data: { id, status: "denied" } });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["calendar"] }),
         queryClient.invalidateQueries({ queryKey: ["requests"] }),
@@ -109,7 +109,14 @@ function CalendarPage() {
         queryClient.invalidateQueries({ queryKey: ["schedule"] }),
         queryClient.invalidateQueries({ queryKey: ["officer-portal"] }),
       ]);
-      toast.success(`${name} removed from the calendar`);
+      if (result.calendar.message) {
+        toast.warning(
+          `${name} removed, but couldn’t delete the Google Calendar event: ${result.calendar.message}`,
+          { duration: 12_000 },
+        );
+      } else {
+        toast.success(`${name} removed from the calendar`);
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not remove");
     }
@@ -414,7 +421,13 @@ function CalendarPage() {
           initialEnd={date}
           onCancel={() => setCallIn(false)}
           onSubmit={async (payload) => {
-            await callInLeave({ data: payload });
+            const result = await callInLeave({ data: payload });
+            if (result.calendar.message) {
+              toast.warning(
+                `On leave, but couldn’t add to Google Calendar: ${result.calendar.message}`,
+                { duration: 12_000 },
+              );
+            }
             await Promise.all([
               queryClient.invalidateQueries({ queryKey: ["calendar"] }),
               queryClient.invalidateQueries({ queryKey: ["requests"] }),

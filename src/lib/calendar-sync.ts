@@ -2,9 +2,11 @@ import {
   createGoogleLeaveEvent,
   createGoogleLeaveEventOAuth,
   deleteGoogleLeaveEvent,
+  deleteGoogleLeaveEventOAuth,
   fetchGoogleCalendar,
   fetchGoogleCalendarOAuth,
   leaveEventTitle,
+  type CalendarWriteFailure,
 } from "@/lib/google-calendar";
 import { getConnectorAccessToken } from "@/lib/app-data/client.server";
 import { normalizeFeedUrl, parseIcsEvents } from "@/lib/ics";
@@ -369,6 +371,11 @@ export async function disconnectShiftGoogle(shiftId: string) {
   await clearShiftGoogleTokens(shiftId);
 }
 
+export type LeaveCalendarWrite =
+  | { status: "written"; eventId: string }
+  | { status: "skipped"; reason: "not_connected"; message: string }
+  | { status: "failed"; reason: CalendarWriteFailure["reason"]; message: string };
+
 export async function writeApprovedLeave(input: {
   shiftId: string;
   googleCalendar: boolean;
@@ -377,10 +384,16 @@ export async function writeApprovedLeave(input: {
   startDate: string;
   endDate: string;
   reason: string;
-}): Promise<string | null> {
-  if (!input.googleCalendar) return null;
+}): Promise<LeaveCalendarWrite> {
+  if (!input.googleCalendar) {
+    return {
+      status: "skipped",
+      reason: "not_connected",
+      message: "Google Calendar is not connected for this shift.",
+    };
+  }
   const summary = leaveEventTitle(input.lastName, kindLabel(input.kind));
-  // Prefer standalone OAuth on Netlify.
+  // Standalone OAuth (Netlify) — tokens + selected calendar live on the shift.
   const oauthWritten = await createGoogleLeaveEventOAuth({
     shiftId: input.shiftId,
     summary,
@@ -388,18 +401,44 @@ export async function writeApprovedLeave(input: {
     startDate: input.startDate,
     endDate: input.endDate,
   });
-  if (oauthWritten.ok) return oauthWritten.eventId;
-  const written = await createGoogleLeaveEvent({
-    summary,
-    description: input.reason,
-    startDate: input.startDate,
-    endDate: input.endDate,
-  });
-  if (!written.ok) return null;
-  return written.eventId;
+  if (oauthWritten.ok) return { status: "written", eventId: oauthWritten.eventId };
+  // Legacy Grok connector only when this request actually carries a connector
+  // token (Grok-hosted). On Netlify it can never succeed and would hide the
+  // real OAuth error.
+  if (oauthWritten.reason === "not_connected" && getConnectorAccessToken()) {
+    const written = await createGoogleLeaveEvent({
+      summary,
+      description: input.reason,
+      startDate: input.startDate,
+      endDate: input.endDate,
+    });
+    if (written.ok) return { status: "written", eventId: written.eventId };
+    return { status: "failed", reason: "error", message: written.message };
+  }
+  if (oauthWritten.reason === "not_connected") {
+    return {
+      status: "failed",
+      reason: "reconnect",
+      message: "this shift is marked connected but has no Google sign-in stored — reconnect Google Calendar under Calendar → Calendar access.",
+    };
+  }
+  return { status: "failed", reason: oauthWritten.reason, message: oauthWritten.message };
 }
 
-export async function removeApprovedLeave(eventId: string | null | undefined) {
-  if (!eventId) return;
-  await deleteGoogleLeaveEvent(eventId).catch(() => undefined);
+export async function removeApprovedLeave(
+  shiftId: string,
+  eventId: string | null | undefined,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  if (!eventId) return { ok: true };
+  const oauth = await deleteGoogleLeaveEventOAuth(shiftId, eventId).catch((e: unknown) => ({
+    ok: false as const,
+    reason: "error" as const,
+    message: e instanceof Error ? e.message : "could not remove the Google Calendar event",
+  }));
+  if (oauth.ok) return { ok: true };
+  if (oauth.reason === "not_connected" && getConnectorAccessToken()) {
+    const legacy = await deleteGoogleLeaveEvent(eventId).catch(() => null);
+    if (legacy?.ok) return { ok: true };
+  }
+  return { ok: false, message: oauth.message };
 }

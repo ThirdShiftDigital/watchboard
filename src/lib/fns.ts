@@ -16,7 +16,7 @@ import { buildRows, statusForOfficer } from "@/lib/watch-logic";
 import { applySeniority, normalizeZoneOrder, sortRoster } from "@/lib/types";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { requireCap, accessFor } from "@/lib/staff";
-import { currentShiftFor, ensureShifts } from "@/lib/shifts";
+import { currentShiftFor, ensureShifts, loadShift } from "@/lib/shifts";
 import {
   connectShiftGoogle,
   disconnectShiftGoogle,
@@ -25,6 +25,7 @@ import {
   peekCalendarCache,
   removeApprovedLeave,
   writeApprovedLeave,
+  type LeaveCalendarWrite,
 } from "@/lib/calendar-sync";
 
 type OfficerRow = {
@@ -322,7 +323,7 @@ export const listRequests = createServerFn({ method: "GET" })
       loadRequests(shift.id),
       loadOfficers(shift.id),
     ]);
-    return { requests, officers };
+    return { requests, officers, googleCalendar: Boolean(shift.googleCalendar) };
   });
 
 export const getOfficerPortal = createServerFn({ method: "POST" })
@@ -414,6 +415,21 @@ export const createRequest = createServerFn({ method: "POST" })
     return { id: Number(rows[0]?.id) };
   });
 
+type CalendarOutcome = {
+  /** True when the leave is on Google Calendar (written now or earlier). */
+  written: boolean;
+  /** Why it is not — shown to the approver. Null when written or not connected. */
+  message: string | null;
+  reason: string | null;
+};
+
+function calendarOutcome(write: LeaveCalendarWrite): CalendarOutcome {
+  if (write.status === "written") return { written: true, message: null, reason: null };
+  // Shift never connected Google: nothing to warn about.
+  if (write.status === "skipped") return { written: false, message: null, reason: write.reason };
+  return { written: false, message: write.message, reason: write.reason };
+}
+
 export const setRequestStatus = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(
@@ -434,12 +450,20 @@ export const setRequestStatus = createServerFn({ method: "POST" })
     `;
     const row = existing[0];
     if (!row) throw new Error("Request not found.");
-    const shift = await currentShiftFor(context.userId);
+    // Use the requesting officer's shift (its Google connection + calendar),
+    // not whatever shift the approver happens to have active.
+    const ownerShift = await sql<{ shift_id: string | null }>`
+      select shift_id from officers where id = ${row.officer_id} limit 1
+    `;
+    const shift =
+      (ownerShift[0]?.shift_id ? await loadShift(ownerShift[0].shift_id) : null) ??
+      (await currentShiftFor(context.userId));
     const officers = await loadOfficers(shift.id);
     const officer = officers.find((o) => o.id === row.officer_id);
     await sql`
       update time_off_requests set status = ${data.status} where id = ${data.id}
     `;
+    let calendar: CalendarOutcome = { written: false, message: null, reason: null };
     if (data.status === "approved") {
       await sql`
         delete from zone_assignments
@@ -447,26 +471,89 @@ export const setRequestStatus = createServerFn({ method: "POST" })
           and date >= ${row.start_date}
           and date <= ${row.end_date}
       `;
-      const eventId = await writeApprovedLeave({
-        shiftId: shift.id,
-        googleCalendar: Boolean(shift.googleCalendar),
-        lastName: officer?.lastName || officer?.name || "LEAVE",
-        kind: row.kind as RequestKind,
-        startDate: row.start_date,
-        endDate: row.end_date,
-        reason: row.reason ?? "",
-      });
-      if (eventId) {
-        await sql`update time_off_requests set calendar_event_id = ${eventId} where id = ${data.id}`;
+      if (row.calendar_event_id) {
+        // Already on Google Calendar — don't create a duplicate.
+        calendar = { written: true, message: null, reason: null };
+      } else {
+        const write = await writeApprovedLeave({
+          shiftId: shift.id,
+          googleCalendar: Boolean(shift.googleCalendar),
+          lastName: officer?.lastName || officer?.name || "LEAVE",
+          kind: row.kind as RequestKind,
+          startDate: row.start_date,
+          endDate: row.end_date,
+          reason: row.reason ?? "",
+        }).catch((e: unknown) => ({
+          status: "failed" as const,
+          reason: "error" as const,
+          message: e instanceof Error ? e.message : "unexpected error writing to Google Calendar",
+        }));
+        calendar = calendarOutcome(write);
+        if (write.status === "written") {
+          await sql`update time_off_requests set calendar_event_id = ${write.eventId} where id = ${data.id}`;
+        }
       }
-    }
-    if (data.status === "denied") {
-      await removeApprovedLeave(row.calendar_event_id);
+    } else if (row.calendar_event_id) {
+      const removed = await removeApprovedLeave(shift.id, row.calendar_event_id);
       await sql`
         update time_off_requests set calendar_event_id = null where id = ${data.id}
       `;
+      if (!removed.ok) {
+        calendar = { written: false, message: removed.message, reason: "error" };
+      }
     }
-    return { ok: true, startDate: row.start_date, endDate: row.end_date };
+    return { ok: true, startDate: row.start_date, endDate: row.end_date, calendar };
+  });
+
+/** Retry writing an approved request to Google Calendar (no roster changes). */
+export const retryLeaveCalendar = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ id: z.number().int() }))
+  .handler(async ({ data, context }) => {
+    await requireCap(context.userId, "approveRequests");
+    const { getSql } = await import("@/lib/db");
+    const sql = await getSql();
+    const existing = await sql<RequestRow>`
+      select id, officer_id, start_date, end_date, kind, reason, status, created_at::text as created_at, calendar_event_id
+      from time_off_requests
+      where id = ${data.id}
+      limit 1
+    `;
+    const row = existing[0];
+    if (!row) throw new Error("Request not found.");
+    if (row.status !== "approved") throw new Error("Only approved requests go on the calendar.");
+    if (row.calendar_event_id) {
+      return { calendar: { written: true, message: null, reason: null } satisfies CalendarOutcome };
+    }
+    const ownerShift = await sql<{ shift_id: string | null }>`
+      select shift_id from officers where id = ${row.officer_id} limit 1
+    `;
+    const shift =
+      (ownerShift[0]?.shift_id ? await loadShift(ownerShift[0].shift_id) : null) ??
+      (await currentShiftFor(context.userId));
+    const officers = await loadOfficers(shift.id);
+    const officer = officers.find((o) => o.id === row.officer_id);
+    const write = await writeApprovedLeave({
+      shiftId: shift.id,
+      googleCalendar: Boolean(shift.googleCalendar),
+      lastName: officer?.lastName || officer?.name || "LEAVE",
+      kind: row.kind as RequestKind,
+      startDate: row.start_date,
+      endDate: row.end_date,
+      reason: row.reason ?? "",
+    }).catch((e: unknown) => ({
+      status: "failed" as const,
+      reason: "error" as const,
+      message: e instanceof Error ? e.message : "unexpected error writing to Google Calendar",
+    }));
+    if (write.status === "written") {
+      await sql`update time_off_requests set calendar_event_id = ${write.eventId} where id = ${data.id}`;
+    }
+    const calendar = calendarOutcome(write);
+    if (write.status === "skipped") {
+      return { calendar: { ...calendar, message: write.message } };
+    }
+    return { calendar };
   });
 
 export const cancelMyRequest = createServerFn({ method: "POST" })
@@ -537,7 +624,7 @@ export const callInLeave = createServerFn({ method: "POST" })
         and date >= ${data.startDate}
         and date <= ${data.endDate}
     `;
-    const eventId = await writeApprovedLeave({
+    const write = await writeApprovedLeave({
       shiftId: shift.id,
       googleCalendar: Boolean(shift.googleCalendar),
       lastName: officer.lastName || officer.name,
@@ -545,11 +632,15 @@ export const callInLeave = createServerFn({ method: "POST" })
       startDate: data.startDate,
       endDate: data.endDate,
       reason: note,
-    });
-    if (eventId) {
-      await sql`update time_off_requests set calendar_event_id = ${eventId} where id = ${id}`;
+    }).catch((e: unknown) => ({
+      status: "failed" as const,
+      reason: "error" as const,
+      message: e instanceof Error ? e.message : "unexpected error writing to Google Calendar",
+    }));
+    if (write.status === "written") {
+      await sql`update time_off_requests set calendar_event_id = ${write.eventId} where id = ${id}`;
     }
-    return { id };
+    return { id, calendar: calendarOutcome(write) };
   });
 
 export const toggleRdo = createServerFn({ method: "POST" })

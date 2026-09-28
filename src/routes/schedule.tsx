@@ -343,10 +343,17 @@ function SchedulePage() {
           initialEnd={today}
           onCancel={() => setCallIn(false)}
           onSubmit={async (payload) => {
-            await callInLeave({ data: payload });
+            const result = await callInLeave({ data: payload });
             await invalidateRoster(queryClient);
             setCallIn(false);
-            toast.success("On leave — watch and calendar updated");
+            if (result.calendar.message) {
+              toast.warning(
+                `On leave, but couldn’t add to Google Calendar: ${result.calendar.message}`,
+                { duration: 12_000 },
+              );
+            } else {
+              toast.success("On leave — watch and calendar updated");
+            }
           }}
         />
       ) : null}
