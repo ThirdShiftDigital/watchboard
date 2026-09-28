@@ -243,40 +243,172 @@ export async function fetchGoogleCalendarOAuth(
   };
 }
 
+export type CalendarWriteFailure = {
+  ok: false;
+  reason: "not_connected" | "reconnect" | "no_access" | "not_found" | "error";
+  message: string;
+};
+
+/** Turn a Google Calendar API error response into a short, human reason. */
+async function describeGoogleWriteError(res: Response): Promise<CalendarWriteFailure> {
+  const text = await res.text().catch(() => "");
+  let googleMessage = "";
+  let googleReason = "";
+  try {
+    const parsed = JSON.parse(text) as {
+      error?: { message?: string; errors?: { reason?: string; message?: string }[] };
+    };
+    googleMessage = parsed.error?.message ?? "";
+    googleReason = parsed.error?.errors?.[0]?.reason ?? "";
+  } catch {
+    googleMessage = text.slice(0, 160);
+  }
+  if (res.status === 401) {
+    return {
+      ok: false,
+      reason: "reconnect",
+      message: "Google sign-in expired — reconnect Google Calendar under Calendar → Calendar access.",
+    };
+  }
+  if (
+    res.status === 403 &&
+    (googleReason === "requiredAccessLevel" ||
+      googleReason === "forbidden" ||
+      /writer access|access to this calendar/i.test(googleMessage))
+  ) {
+    return {
+      ok: false,
+      reason: "no_access",
+      message:
+        "the connected Google account has view-only access to this calendar. Ask the owner to share it with “Make changes to events”.",
+    };
+  }
+  if (res.status === 403 && /insufficient.*(scope|permission)/i.test(googleMessage)) {
+    return {
+      ok: false,
+      reason: "reconnect",
+      message: "Google did not grant calendar write access — reconnect Google Calendar and allow calendar access.",
+    };
+  }
+  if (res.status === 404) {
+    return {
+      ok: false,
+      reason: "not_found",
+      message:
+        "Google could not find the selected calendar for the connected account. Check the Calendar ID under Calendar access.",
+    };
+  }
+  return {
+    ok: false,
+    reason: "error",
+    message: `Google Calendar error (${res.status})${googleMessage ? `: ${googleMessage}` : ""}`,
+  };
+}
+
+async function oauthTokensOrFailure(shiftId: string) {
+  const { getValidAccessTokenForShift } = await import("@/lib/google-oauth");
+  try {
+    const tokens = await getValidAccessTokenForShift(shiftId);
+    if (!tokens?.accessToken) {
+      return {
+        failure: {
+          ok: false,
+          reason: "not_connected",
+          message: "Google Calendar is not connected for this shift.",
+        } satisfies CalendarWriteFailure,
+      };
+    }
+    return { tokens };
+  } catch (e) {
+    const raw = e instanceof Error ? e.message : String(e);
+    console.error("[calendar] token refresh failed", { shiftId, error: raw.slice(0, 200) });
+    return {
+      failure: {
+        ok: false,
+        reason: "reconnect",
+        message: /invalid_grant/i.test(raw)
+          ? "Google access was revoked or expired — reconnect Google Calendar under Calendar → Calendar access."
+          : `could not refresh Google access (${raw.slice(0, 120)}). Reconnect Google Calendar.`,
+      } satisfies CalendarWriteFailure,
+    };
+  }
+}
+
 export async function createGoogleLeaveEventOAuth(input: {
   shiftId: string;
   summary: string;
   description: string;
   startDate: string;
   endDate: string;
-}): Promise<{ ok: true; eventId: string } | { ok: false; message: string }> {
-  const { getValidAccessTokenForShift } = await import("@/lib/google-oauth");
-  const tokens = await getValidAccessTokenForShift(input.shiftId);
-  if (!tokens?.accessToken) {
-    return { ok: false, message: "Google Calendar is not connected for this shift." };
-  }
-  const calendarId = encodeURIComponent(tokens.calendarId || "primary");
+}): Promise<{ ok: true; eventId: string; calendarId: string } | CalendarWriteFailure> {
+  const auth = await oauthTokensOrFailure(input.shiftId);
+  if (auth.failure) return auth.failure;
+  const tokens = auth.tokens;
+  const calendarId = tokens.calendarId || "primary";
   const exclusiveEnd = addDays(input.endDate, 1);
-  const res = await fetch(
-    `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${tokens.accessToken}`,
-        "Content-Type": "application/json",
+  let res: Response;
+  try {
+    res = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${tokens.accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          summary: input.summary,
+          description: input.description,
+          start: { date: input.startDate },
+          end: { date: exclusiveEnd },
+        }),
+        signal: AbortSignal.timeout(10_000),
       },
-      body: JSON.stringify({
-        summary: input.summary,
-        description: input.description,
-        start: { date: input.startDate },
-        end: { date: exclusiveEnd },
-      }),
-    },
-  );
+    );
+  } catch (e) {
+    return {
+      ok: false,
+      reason: "error",
+      message: `could not reach Google Calendar (${e instanceof Error ? e.message : "network error"})`,
+    };
+  }
   if (!res.ok) {
-    const text = await res.text();
-    return { ok: false, message: `Could not write leave event (${res.status}): ${text.slice(0, 160)}` };
+    const failure = await describeGoogleWriteError(res);
+    console.error("[calendar] leave write failed", {
+      shiftId: input.shiftId,
+      calendarId,
+      status: res.status,
+      reason: failure.reason,
+      message: failure.message,
+    });
+    return failure;
   }
   const data = (await res.json()) as { id?: string };
-  return { ok: true, eventId: data.id ?? `wb-${input.startDate}` };
+  if (!data.id) {
+    return { ok: false, reason: "error", message: "Google did not return an event id." };
+  }
+  return { ok: true, eventId: data.id, calendarId };
+}
+
+export async function deleteGoogleLeaveEventOAuth(
+  shiftId: string,
+  eventId: string,
+): Promise<{ ok: true } | CalendarWriteFailure> {
+  const auth = await oauthTokensOrFailure(shiftId);
+  if (auth.failure) return auth.failure;
+  const calendarId = auth.tokens.calendarId || "primary";
+  const res = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${auth.tokens.accessToken}` },
+      signal: AbortSignal.timeout(10_000),
+    },
+  ).catch(() => null);
+  if (!res) return { ok: false, reason: "error", message: "could not reach Google Calendar" };
+  // Already gone (or written to a previously selected calendar) — nothing to remove.
+  if (res.ok || res.status === 404 || res.status === 410) return { ok: true };
+  const failure = await describeGoogleWriteError(res);
+  console.error("[calendar] leave delete failed", { shiftId, calendarId, status: res.status, reason: failure.reason });
+  return failure;
 }
