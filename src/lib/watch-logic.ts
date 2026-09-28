@@ -8,7 +8,7 @@ import type {
   ZoneAssignment,
   RequestKind,
 } from "./types";
-import { kindShort } from "./types";
+import { kindShort, REQUEST_KINDS } from "./types";
 
 export function statusForOfficer(
   officer: Officer,
@@ -72,18 +72,99 @@ export function lastNameFromTitle(name: string): string {
   return (parts[parts.length - 1] ?? "").toUpperCase();
 }
 
+const NAME_SUFFIXES = new Set(["JR", "SR", "II", "III", "IV", "V"]);
+const RANK_WORDS = new Set([
+  "LT", "LIEUTENANT", "SGT", "SERGEANT", "CPL", "CORPORAL", "FTO", "CPL/FTO",
+  "DEP", "DEPUTY", "OFC", "OFFICER", "CPT", "CAPT", "CAPTAIN", "MAJ", "MAJOR",
+  "DET", "INV", "TPR", "PTL", "CHIEF", "SHERIFF",
+]);
+
+function nameTokens(name: string): string[] {
+  return name
+    .toUpperCase()
+    .replace(/[.,]/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/** Last name from a display name, skipping suffixes like Jr./III. */
+export function deriveLastName(name: string): string {
+  const tokens = nameTokens(name).filter((t) => !NAME_SUFFIXES.has(t));
+  return tokens[tokens.length - 1] ?? name.trim().toUpperCase();
+}
+
+/** Officer's last name, uppercase. Uses last_name unless it is empty or just a suffix. */
+export function officerLastName(o: Pick<Officer, "name" | "lastName">): string {
+  const stored = (o.lastName ?? "").trim().toUpperCase().replace(/[.,]/g, "");
+  if (stored && !NAME_SUFFIXES.has(stored)) return stored;
+  return deriveLastName(o.name);
+}
+
+/** First initial from the display name ("LT. C. KEYES" -> "C"), or "" if none. */
+export function officerFirstInitial(o: Pick<Officer, "name" | "lastName">): string {
+  const last = officerLastName(o);
+  const tokens = nameTokens(o.name).filter(
+    (t) => !NAME_SUFFIXES.has(t) && !RANK_WORDS.has(t) && !t.includes("/"),
+  );
+  const idx = tokens.lastIndexOf(last);
+  const before = (idx > 0 ? tokens.slice(0, idx) : tokens.slice(0, -1)).filter((t) =>
+    /^[A-Z]/.test(t),
+  );
+  return before[0]?.[0] ?? "";
+}
+
+/**
+ * Google event title for approved leave: "ANDERSON - VACATION".
+ * When another officer on the shift shares the last name: "A. ANDERSON - VACATION".
+ * Unknown/missing leave type: just "ANDERSON".
+ */
+export function leaveEventSummary(
+  officer: Pick<Officer, "id" | "name" | "lastName">,
+  shiftOfficers: Pick<Officer, "id" | "name" | "lastName">[],
+  kind: string | null | undefined,
+): string {
+  const last = officerLastName(officer);
+  const shared = shiftOfficers.some((o) => o.id !== officer.id && officerLastName(o) === last);
+  const initial = shared ? officerFirstInitial(officer) : "";
+  const who = initial ? `${initial}. ${last}` : last;
+  const label = REQUEST_KINDS.find((k) => k.id === kind)?.label;
+  return label ? `${who} - ${label.toUpperCase()}` : who;
+}
+
+/**
+ * Match a calendar event title to roster officers by last name (case-insensitive).
+ * Handles "SCOTT", "Scott", "SCOTT - VACATION", "J. SCOTT - SICK", "Scott's day off".
+ * If several officers share the matched last name and the title carries a first
+ * initial/name right before it, only the officer(s) with that initial match.
+ */
 export function matchOfficersToEvent(
   title: string,
   officers: Officer[],
 ): string[] {
-  const hay = ` ${title.toUpperCase().replace(/[^A-Z0-9 ]/g, " ")} `;
-  const hits: string[] = [];
+  const hay = ` ${title.toUpperCase().replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim()} `;
+  const byLast = new Map<string, Officer[]>();
   for (const o of officers) {
-    const last = o.lastName.toUpperCase();
+    const last = officerLastName(o).replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
     if (last.length < 3) continue;
-    if (hay.includes(` ${last} `) || hay.includes(` ${last}'S `)) {
-      hits.push(o.id);
+    if (hay.includes(` ${last} `) || hay.includes(` ${last} S `)) {
+      byLast.set(last, [...(byLast.get(last) ?? []), o]);
     }
+  }
+  const hits: string[] = [];
+  for (const [last, group] of byLast) {
+    if (group.length > 1) {
+      const m = hay.match(new RegExp(` ([A-Z])[A-Z]* ${last} `));
+      const initial = m?.[1];
+      if (initial) {
+        const narrowed = group.filter((o) => officerFirstInitial(o) === initial);
+        if (narrowed.length) {
+          hits.push(...narrowed.map((o) => o.id));
+          continue;
+        }
+      }
+    }
+    hits.push(...group.map((o) => o.id));
   }
   return hits;
 }

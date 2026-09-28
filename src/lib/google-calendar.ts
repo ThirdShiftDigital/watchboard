@@ -186,9 +186,6 @@ export async function deleteGoogleLeaveEvent(
   };
 }
 
-export function leaveEventTitle(lastName: string, kindLabel: string): string {
-  return `${lastName.toUpperCase()} ${kindLabel.toUpperCase()}`;
-}
 
 export async function fetchGoogleCalendarOAuth(
   shiftId: string,

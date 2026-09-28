@@ -12,7 +12,7 @@ import type {
   WatchBoard,
   ZoneAssignment,
 } from "@/lib/types";
-import { buildRows, statusForOfficer } from "@/lib/watch-logic";
+import { buildRows, deriveLastName, leaveEventSummary, statusForOfficer } from "@/lib/watch-logic";
 import { applySeniority, normalizeZoneOrder, sortRoster } from "@/lib/types";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { requireCap, accessFor } from "@/lib/staff";
@@ -478,8 +478,9 @@ export const setRequestStatus = createServerFn({ method: "POST" })
         const write = await writeApprovedLeave({
           shiftId: shift.id,
           googleCalendar: Boolean(shift.googleCalendar),
-          lastName: officer?.lastName || officer?.name || "LEAVE",
-          kind: row.kind as RequestKind,
+          summary: officer
+            ? leaveEventSummary(officer, officers, row.kind)
+            : "LEAVE",
           startDate: row.start_date,
           endDate: row.end_date,
           reason: row.reason ?? "",
@@ -536,8 +537,9 @@ export const retryLeaveCalendar = createServerFn({ method: "POST" })
     const write = await writeApprovedLeave({
       shiftId: shift.id,
       googleCalendar: Boolean(shift.googleCalendar),
-      lastName: officer?.lastName || officer?.name || "LEAVE",
-      kind: row.kind as RequestKind,
+      summary: officer
+            ? leaveEventSummary(officer, officers, row.kind)
+            : "LEAVE",
       startDate: row.start_date,
       endDate: row.end_date,
       reason: row.reason ?? "",
@@ -627,8 +629,7 @@ export const callInLeave = createServerFn({ method: "POST" })
     const write = await writeApprovedLeave({
       shiftId: shift.id,
       googleCalendar: Boolean(shift.googleCalendar),
-      lastName: officer.lastName || officer.name,
-      kind: data.kind,
+      summary: leaveEventSummary(officer, officers, data.kind),
       startDate: data.startDate,
       endDate: data.endDate,
       reason: note,
@@ -740,12 +741,7 @@ export const createOfficer = createServerFn({ method: "POST" })
       throw new Error(`Unit ${unit} is already on the roster.`);
     }
     const name = displayOfficerName(data.name);
-    const lastName =
-      name
-        .replace(/[.,]/g, " ")
-        .trim()
-        .split(/\s+/)
-        .pop() ?? name;
+    const lastName = deriveLastName(name);
     const id = slugOfficerId(name, unit, new Set(officers.map((o) => o.id)));
     const hireDate = data.hireDate && /^\d{4}-\d{2}-\d{2}$/.test(data.hireDate) ? data.hireDate : null;
     const { getSql } = await import("@/lib/db");
@@ -784,12 +780,7 @@ export const updateOfficer = createServerFn({ method: "POST" })
       throw new Error(`Unit ${unit} is already on the roster.`);
     }
     const name = displayOfficerName(data.name);
-    const lastName =
-      name
-        .replace(/[.,]/g, " ")
-        .trim()
-        .split(/\s+/)
-        .pop() ?? name;
+    const lastName = deriveLastName(name);
     const hireDate = data.hireDate && /^\d{4}-\d{2}-\d{2}$/.test(data.hireDate) ? data.hireDate : null;
     const { getSql } = await import("@/lib/db");
     const sql = await getSql();
