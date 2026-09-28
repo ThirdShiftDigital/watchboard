@@ -16,16 +16,17 @@ import { Route as CalendarRouteImport } from './routes/calendar'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as ForgotRouteImport } from './routes/forgot'
 import { Route as HomeRouteImport } from './routes/home'
-import { Route as PrivacyRouteImport } from './routes/privacy'
-import { Route as TermsRouteImport } from './routes/terms'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as MeRouteImport } from './routes/me'
 import { Route as OnboardRouteImport } from './routes/onboard'
+import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as RequestsRouteImport } from './routes/requests'
 import { Route as ResetRouteImport } from './routes/reset'
 import { Route as ScheduleRouteImport } from './routes/schedule'
 import { Route as SetupRouteImport } from './routes/setup'
+import { Route as TermsRouteImport } from './routes/terms'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
+import { Route as ApiGoogleCallbackRouteImport } from './routes/api/google/callback'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -62,16 +63,6 @@ const HomeRoute = HomeRouteImport.update({
   path: '/home',
   getParentRoute: () => rootRouteImport,
 } as any)
-const PrivacyRoute = PrivacyRouteImport.update({
-  id: '/privacy',
-  path: '/privacy',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const TermsRoute = TermsRouteImport.update({
-  id: '/terms',
-  path: '/terms',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
@@ -85,6 +76,11 @@ const MeRoute = MeRouteImport.update({
 const OnboardRoute = OnboardRouteImport.update({
   id: '/onboard',
   path: '/onboard',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrivacyRoute = PrivacyRouteImport.update({
+  id: '/privacy',
+  path: '/privacy',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RequestsRoute = RequestsRouteImport.update({
@@ -107,9 +103,19 @@ const SetupRoute = SetupRouteImport.update({
   path: '/setup',
   getParentRoute: () => rootRouteImport,
 } as any)
+const TermsRoute = TermsRouteImport.update({
+  id: '/terms',
+  path: '/terms',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiAuthSplatRoute = ApiAuthSplatRouteImport.update({
   id: '/api/auth/$',
   path: '/api/auth/$',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiGoogleCallbackRoute = ApiGoogleCallbackRouteImport.update({
+  id: '/api/google/callback',
+  path: '/api/google/callback',
   getParentRoute: () => rootRouteImport,
 } as any)
 
@@ -121,16 +127,17 @@ export interface FileRoutesByFullPath {
   '/dashboard': typeof DashboardRoute
   '/forgot': typeof ForgotRoute
   '/home': typeof HomeRoute
-  '/privacy': typeof PrivacyRoute
-  '/terms': typeof TermsRoute
   '/login': typeof LoginRoute
   '/me': typeof MeRoute
   '/onboard': typeof OnboardRoute
+  '/privacy': typeof PrivacyRoute
   '/requests': typeof RequestsRoute
   '/reset': typeof ResetRoute
   '/schedule': typeof ScheduleRoute
   '/setup': typeof SetupRoute
+  '/terms': typeof TermsRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/google/callback': typeof ApiGoogleCallbackRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -140,16 +147,17 @@ export interface FileRoutesByTo {
   '/dashboard': typeof DashboardRoute
   '/forgot': typeof ForgotRoute
   '/home': typeof HomeRoute
-  '/privacy': typeof PrivacyRoute
-  '/terms': typeof TermsRoute
   '/login': typeof LoginRoute
   '/me': typeof MeRoute
   '/onboard': typeof OnboardRoute
+  '/privacy': typeof PrivacyRoute
   '/requests': typeof RequestsRoute
   '/reset': typeof ResetRoute
   '/schedule': typeof ScheduleRoute
   '/setup': typeof SetupRoute
+  '/terms': typeof TermsRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/google/callback': typeof ApiGoogleCallbackRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -160,16 +168,17 @@ export interface FileRoutesById {
   '/dashboard': typeof DashboardRoute
   '/forgot': typeof ForgotRoute
   '/home': typeof HomeRoute
-  '/privacy': typeof PrivacyRoute
-  '/terms': typeof TermsRoute
   '/login': typeof LoginRoute
   '/me': typeof MeRoute
   '/onboard': typeof OnboardRoute
+  '/privacy': typeof PrivacyRoute
   '/requests': typeof RequestsRoute
   '/reset': typeof ResetRoute
   '/schedule': typeof ScheduleRoute
   '/setup': typeof SetupRoute
+  '/terms': typeof TermsRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/google/callback': typeof ApiGoogleCallbackRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -181,16 +190,17 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/forgot'
     | '/home'
-    | '/privacy'
-    | '/terms'
     | '/login'
     | '/me'
     | '/onboard'
+    | '/privacy'
     | '/requests'
     | '/reset'
     | '/schedule'
     | '/setup'
+    | '/terms'
     | '/api/auth/$'
+    | '/api/google/callback'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -200,16 +210,17 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/forgot'
     | '/home'
-    | '/privacy'
-    | '/terms'
     | '/login'
     | '/me'
     | '/onboard'
+    | '/privacy'
     | '/requests'
     | '/reset'
     | '/schedule'
     | '/setup'
+    | '/terms'
     | '/api/auth/$'
+    | '/api/google/callback'
   id:
     | '__root__'
     | '/'
@@ -219,16 +230,17 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/forgot'
     | '/home'
-    | '/privacy'
-    | '/terms'
     | '/login'
     | '/me'
     | '/onboard'
+    | '/privacy'
     | '/requests'
     | '/reset'
     | '/schedule'
     | '/setup'
+    | '/terms'
     | '/api/auth/$'
+    | '/api/google/callback'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -239,16 +251,17 @@ export interface RootRouteChildren {
   DashboardRoute: typeof DashboardRoute
   ForgotRoute: typeof ForgotRoute
   HomeRoute: typeof HomeRoute
-  PrivacyRoute: typeof PrivacyRoute
-  TermsRoute: typeof TermsRoute
   LoginRoute: typeof LoginRoute
   MeRoute: typeof MeRoute
   OnboardRoute: typeof OnboardRoute
+  PrivacyRoute: typeof PrivacyRoute
   RequestsRoute: typeof RequestsRoute
   ResetRoute: typeof ResetRoute
   ScheduleRoute: typeof ScheduleRoute
   SetupRoute: typeof SetupRoute
+  TermsRoute: typeof TermsRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
+  ApiGoogleCallbackRoute: typeof ApiGoogleCallbackRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -302,20 +315,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof HomeRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/privacy': {
-      id: '/privacy'
-      path: '/privacy'
-      fullPath: '/privacy'
-      preLoaderRoute: typeof PrivacyRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/terms': {
-      id: '/terms'
-      path: '/terms'
-      fullPath: '/terms'
-      preLoaderRoute: typeof TermsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/login': {
       id: '/login'
       path: '/login'
@@ -335,6 +334,13 @@ declare module '@tanstack/react-router' {
       path: '/onboard'
       fullPath: '/onboard'
       preLoaderRoute: typeof OnboardRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/privacy': {
+      id: '/privacy'
+      path: '/privacy'
+      fullPath: '/privacy'
+      preLoaderRoute: typeof PrivacyRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/requests': {
@@ -365,11 +371,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SetupRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/terms': {
+      id: '/terms'
+      path: '/terms'
+      fullPath: '/terms'
+      preLoaderRoute: typeof TermsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/auth/$': {
       id: '/api/auth/$'
       path: '/api/auth/$'
       fullPath: '/api/auth/$'
       preLoaderRoute: typeof ApiAuthSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/google/callback': {
+      id: '/api/google/callback'
+      path: '/api/google/callback'
+      fullPath: '/api/google/callback'
+      preLoaderRoute: typeof ApiGoogleCallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
@@ -383,16 +403,17 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardRoute: DashboardRoute,
   ForgotRoute: ForgotRoute,
   HomeRoute: HomeRoute,
-  PrivacyRoute: PrivacyRoute,
-  TermsRoute: TermsRoute,
   LoginRoute: LoginRoute,
   MeRoute: MeRoute,
   OnboardRoute: OnboardRoute,
+  PrivacyRoute: PrivacyRoute,
   RequestsRoute: RequestsRoute,
   ResetRoute: ResetRoute,
   ScheduleRoute: ScheduleRoute,
   SetupRoute: SetupRoute,
+  TermsRoute: TermsRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
+  ApiGoogleCallbackRoute: ApiGoogleCallbackRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

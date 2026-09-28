@@ -29,7 +29,11 @@ export const Route = createFileRoute("/api/google/callback")({
 
         try {
           const tokens = await exchangeGoogleCode(code);
-          await saveShiftGoogleTokens(parsed.shiftId, parsed.userId, tokens, "primary");
+          // Keep the commander's chosen calendar across reconnects (default primary).
+          await saveShiftGoogleTokens(parsed.shiftId, parsed.userId, tokens);
+          // A (re)connect may be a different Google account — drop stale events.
+          const { clearCalendarCache } = await import("@/lib/calendar-sync");
+          await clearCalendarCache(parsed.shiftId).catch(() => undefined);
           return Response.redirect(`${base}/calendar?google=connected`, 302);
         } catch (e) {
           const message = e instanceof Error ? e.message : "Google OAuth failed.";

@@ -20,6 +20,7 @@ import { currentShiftFor, ensureShifts } from "@/lib/shifts";
 import {
   connectShiftGoogle,
   disconnectShiftGoogle,
+  selectShiftGoogleCalendar,
   loadShiftCalendar,
   peekCalendarCache,
   removeApprovedLeave,
@@ -802,11 +803,21 @@ export const getCalendarFeed = createServerFn({ method: "POST" })
     const access = await requireCap(context.userId, "viewCalendar");
     const shift = await currentShiftFor(context.userId);
     const url = shift.calendarFeedUrl;
+    let googleCalendarId = "primary";
+    if (access.caps.editWatch) {
+      const { getSql } = await import("@/lib/db");
+      const sql = await getSql();
+      const rows = await sql<{ google_calendar_id: string | null }>`
+        select google_calendar_id from shifts where id = ${shift.id}
+      `;
+      googleCalendarId = rows[0]?.google_calendar_id || "primary";
+    }
     return {
       url: access.caps.editWatch ? url : "",
       connected: Boolean(url) || Boolean(shift.googleCalendar),
       ics: Boolean(url),
       google: Boolean(shift.googleCalendar),
+      googleCalendarId: access.caps.editWatch ? googleCalendarId : "",
       canConnect: access.caps.editWatch,
     };
   });
@@ -843,6 +854,15 @@ export const connectGoogleCalendar = createServerFn({ method: "POST" })
     await requireCap(context.userId, "editWatch");
     const shift = await currentShiftFor(context.userId);
     return connectShiftGoogle(shift.id, context.userId);
+  });
+
+export const setGoogleCalendarId = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ calendarId: z.string().max(2000) }))
+  .handler(async ({ data, context }) => {
+    await requireCap(context.userId, "editWatch");
+    const shift = await currentShiftFor(context.userId);
+    return selectShiftGoogleCalendar(shift.id, data.calendarId);
   });
 
 export const disconnectGoogleCalendar = createServerFn({ method: "POST" })
