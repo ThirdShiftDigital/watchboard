@@ -115,9 +115,10 @@ export function officerFirstInitial(o: Pick<Officer, "name" | "lastName">): stri
 }
 
 /**
- * Google event title for approved leave: "ANDERSON - VACATION".
- * When another officer on the shift shares the last name: "A. ANDERSON - VACATION".
- * Unknown/missing leave type: just "ANDERSON".
+ * Google event title for approved leave, matching the shared calendar:
+ * just "ANDERSON" for every leave type except sick, which is "ANDERSON - SICK".
+ * When another officer on the shift shares the last name: "A. ANDERSON" /
+ * "A. ANDERSON - SICK". The leave type goes in the description instead.
  */
 export function leaveEventSummary(
   officer: Pick<Officer, "id" | "name" | "lastName">,
@@ -128,8 +129,15 @@ export function leaveEventSummary(
   const shared = shiftOfficers.some((o) => o.id !== officer.id && officerLastName(o) === last);
   const initial = shared ? officerFirstInitial(officer) : "";
   const who = initial ? `${initial}. ${last}` : last;
-  const label = REQUEST_KINDS.find((k) => k.id === kind)?.label;
-  return label ? `${who} - ${label.toUpperCase()}` : who;
+  return kind === "sick" ? `${who} - SICK` : who;
+}
+
+/** Event description: leave type label, then the request notes (if any). */
+export function leaveEventDescription(kind: string | null | undefined, reason: string | null | undefined): string {
+  const label = REQUEST_KINDS.find((k) => k.id === kind)?.label ?? "";
+  const notes = (reason ?? "").trim();
+  if (label && notes) return `${label} — ${notes}`;
+  return label || notes;
 }
 
 /**

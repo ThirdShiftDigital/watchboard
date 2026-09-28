@@ -12,7 +12,7 @@ import type {
   WatchBoard,
   ZoneAssignment,
 } from "@/lib/types";
-import { buildRows, deriveLastName, leaveEventSummary, statusForOfficer } from "@/lib/watch-logic";
+import { buildRows, deriveLastName, leaveEventDescription, leaveEventSummary, statusForOfficer } from "@/lib/watch-logic";
 import { applySeniority, normalizeZoneOrder, sortRoster } from "@/lib/types";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { requireCap, accessFor } from "@/lib/staff";
@@ -483,7 +483,7 @@ export const setRequestStatus = createServerFn({ method: "POST" })
             : "LEAVE",
           startDate: row.start_date,
           endDate: row.end_date,
-          reason: row.reason ?? "",
+          reason: leaveEventDescription(row.kind, row.reason),
         }).catch((e: unknown) => ({
           status: "failed" as const,
           reason: "error" as const,
@@ -542,7 +542,7 @@ export const retryLeaveCalendar = createServerFn({ method: "POST" })
             : "LEAVE",
       startDate: row.start_date,
       endDate: row.end_date,
-      reason: row.reason ?? "",
+      reason: leaveEventDescription(row.kind, row.reason),
     }).catch((e: unknown) => ({
       status: "failed" as const,
       reason: "error" as const,
@@ -632,7 +632,7 @@ export const callInLeave = createServerFn({ method: "POST" })
       summary: leaveEventSummary(officer, officers, data.kind),
       startDate: data.startDate,
       endDate: data.endDate,
-      reason: note,
+      reason: leaveEventDescription(data.kind, note),
     }).catch((e: unknown) => ({
       status: "failed" as const,
       reason: "error" as const,
