@@ -22,7 +22,9 @@ export function CalendarFeedPanel({
   googleCalendarId: string;
   canConnect: boolean;
   onSave: (url: string) => Promise<void>;
-  onSelectCalendar: (calendarId: string) => Promise<{ calendarId: string; calendarName: string | null }>;
+  onSelectCalendar: (
+    calendarId: string,
+  ) => Promise<{ calendarId: string; calendarName: string | null; accessRole: string | null }>;
   onConnect: () => Promise<{
     connected: boolean;
     pending?: boolean;
@@ -46,6 +48,13 @@ export function CalendarFeedPanel({
     try {
       const result = await onSelectCalendar(calendarDraft.trim());
       setCalendarDraft(isPrimaryCalendarId(result.calendarId) ? "" : result.calendarId);
+      if (result.accessRole && result.accessRole !== "owner" && result.accessRole !== "writer") {
+        toast.warning(
+          `Reading “${result.calendarName ?? result.calendarId}”, but the Google account connected to this shift only has view access — approved days off can’t be written there. Share the calendar with that account using “Make changes to events”, or reconnect with an account that can edit it.`,
+          { duration: 15_000 },
+        );
+        return;
+      }
       toast.success(
         result.calendarName
           ? `Now pulling leave from “${result.calendarName}”`

@@ -322,7 +322,12 @@ export async function clearCalendarCache(shiftId: string) {
 export async function selectShiftGoogleCalendar(
   shiftId: string,
   rawId: string,
-): Promise<{ calendarId: string; calendarName: string | null }> {
+): Promise<{
+  calendarId: string;
+  calendarName: string | null;
+  /** Google's accessRole for the connected account: owner | writer | reader | freeBusyReader. */
+  accessRole: string | null;
+}> {
   const { normalizeGoogleCalendarId } = await import("@/lib/google-calendar-id");
   const calendarId = normalizeGoogleCalendarId(rawId);
   if (calendarId.length > 320 || /\s/.test(calendarId)) {
@@ -330,8 +335,13 @@ export async function selectShiftGoogleCalendar(
   }
 
   let calendarName: string | null = null;
+  let accessRole: string | null = null;
   const { getValidAccessTokenForShift } = await import("@/lib/google-oauth");
-  const tokens = await getValidAccessTokenForShift(shiftId).catch(() => null);
+  const tokens = await getValidAccessTokenForShift(shiftId).catch((e: unknown) => {
+    throw new Error(
+      `Could not refresh the shift's Google access (${e instanceof Error ? e.message.slice(0, 120) : "unknown"}). Disconnect and connect Google Calendar again.`,
+    );
+  });
   if (tokens?.accessToken) {
     const params = new URLSearchParams({ maxResults: "1", singleEvents: "true" });
     const res = await fetch(
@@ -355,15 +365,16 @@ export async function selectShiftGoogleCalendar(
       const text = await res.text();
       throw new Error(`Google Calendar API error (${res.status}): ${text.slice(0, 160)}`);
     }
-    const data = (await res.json().catch(() => ({}))) as { summary?: string };
+    const data = (await res.json().catch(() => ({}))) as { summary?: string; accessRole?: string };
     calendarName = typeof data.summary === "string" && data.summary.trim() ? data.summary : null;
+    accessRole = typeof data.accessRole === "string" ? data.accessRole : null;
   }
 
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
   await sql`update shifts set google_calendar_id = ${calendarId} where id = ${shiftId}`;
   await clearCalendarCache(shiftId);
-  return { calendarId, calendarName };
+  return { calendarId, calendarName, accessRole };
 }
 
 export async function disconnectShiftGoogle(shiftId: string) {
