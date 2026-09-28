@@ -23,7 +23,7 @@ import {
   todayISO,
   weekdayOf,
 } from "@/lib/dates";
-import { callInLeave, connectGoogleCalendar, createRequest, disconnectGoogleCalendar, getCalendarFeed, getCalendarMonth, setCalendarFeed, setRequestStatus } from "@/lib/fns";
+import { callInLeave, connectGoogleCalendar, createRequest, disconnectGoogleCalendar, getCalendarFeed, getCalendarMonth, setCalendarFeed, setGoogleCalendarId, setRequestStatus } from "@/lib/fns";
 import { useMyAccess, usePendingCount, useSupervisorReady } from "@/lib/hooks";
 import { useRefetchWhenConnectorReady } from "@/lib/app-data";
 import { useWatchDate } from "@/lib/store";
@@ -192,6 +192,7 @@ function CalendarPage() {
         <CalendarFeedPanel
           url={feedQuery.data?.url ?? ""}
           google={Boolean(feedQuery.data?.google)}
+          googleCalendarId={feedQuery.data?.googleCalendarId ?? "primary"}
           canConnect={canEditFeed}
           onClose={() => setFeedOpen(false)}
           onConnect={async () => {
@@ -211,6 +212,16 @@ function CalendarPage() {
               queryClient.invalidateQueries({ queryKey: ["calendar"] }),
               queryClient.invalidateQueries({ queryKey: ["watch"] }),
             ]);
+          }}
+          onSelectCalendar={async (calendarId) => {
+            const result = await setGoogleCalendarId({ data: { calendarId } });
+            await Promise.all([
+              queryClient.invalidateQueries({ queryKey: ["calendar-feed"] }),
+              queryClient.invalidateQueries({ queryKey: ["calendar"] }),
+              queryClient.invalidateQueries({ queryKey: ["watch"] }),
+              queryClient.invalidateQueries({ queryKey: ["schedule"] }),
+            ]);
+            return result;
           }}
           onSave={async (url) => {
             await setCalendarFeed({ data: { url } });

@@ -162,7 +162,7 @@ export async function saveShiftGoogleTokens(
   shiftId: string,
   userId: string,
   tokens: TokenResponse,
-  calendarId = "primary",
+  calendarId?: string,
 ) {
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
@@ -176,7 +176,7 @@ export async function saveShiftGoogleTokens(
       google_access_token = ${tokens.access_token},
       google_refresh_token = ${refresh},
       google_token_expiry = ${expiry},
-      google_calendar_id = ${calendarId},
+      google_calendar_id = ${calendarId ?? existing?.calendarId ?? "primary"},
       google_connected_by = ${userId}
     where id = ${shiftId}
   `;

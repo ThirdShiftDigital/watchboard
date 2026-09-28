@@ -301,6 +301,69 @@ export async function connectShiftGoogle(
   };
 }
 
+/** Drop cached Google events so the next load re-fetches from Google. */
+export async function clearCalendarCache(shiftId: string) {
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  await sql`delete from calendar_cache where shift_id = ${shiftId}`;
+  await sql`update shifts set calendar_synced_at = null where id = ${shiftId}`;
+}
+
+/**
+ * Point the shift's Google connection at a specific calendar.
+ *
+ * Uses only the already-granted calendar.events scope: events.list works on any
+ * calendar the connected account can see, so we probe it directly instead of
+ * calling calendarList.list (which would need calendar.readonly /
+ * calendar.calendarlist.readonly).
+ */
+export async function selectShiftGoogleCalendar(
+  shiftId: string,
+  rawId: string,
+): Promise<{ calendarId: string; calendarName: string | null }> {
+  const { normalizeGoogleCalendarId } = await import("@/lib/google-calendar-id");
+  const calendarId = normalizeGoogleCalendarId(rawId);
+  if (calendarId.length > 320 || /\s/.test(calendarId)) {
+    throw new Error("That does not look like a Google Calendar ID.");
+  }
+
+  let calendarName: string | null = null;
+  const { getValidAccessTokenForShift } = await import("@/lib/google-oauth");
+  const tokens = await getValidAccessTokenForShift(shiftId).catch(() => null);
+  if (tokens?.accessToken) {
+    const params = new URLSearchParams({ maxResults: "1", singleEvents: "true" });
+    const res = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?${params}`,
+      {
+        headers: { Authorization: `Bearer ${tokens.accessToken}` },
+        signal: AbortSignal.timeout(8000),
+      },
+    );
+    if (res.status === 404) {
+      throw new Error(
+        "Google could not find that calendar for the connected account. Check the Calendar ID, and that the calendar is shared with the Google account you connected.",
+      );
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(
+        "The connected Google account cannot read that calendar. Share it with that account (\"Make changes to events\"), or reconnect with the right account.",
+      );
+    }
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Google Calendar API error (${res.status}): ${text.slice(0, 160)}`);
+    }
+    const data = (await res.json().catch(() => ({}))) as { summary?: string };
+    calendarName = typeof data.summary === "string" && data.summary.trim() ? data.summary : null;
+  }
+
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  await sql`update shifts set google_calendar_id = ${calendarId} where id = ${shiftId}`;
+  await clearCalendarCache(shiftId);
+  return { calendarId, calendarName };
+}
+
 export async function disconnectShiftGoogle(shiftId: string) {
   const { clearShiftGoogleTokens } = await import("@/lib/google-oauth");
   await clearShiftGoogleTokens(shiftId);
