@@ -143,6 +143,10 @@ export async function ensureTables() {
     alter table time_off_requests
       add column if not exists calendar_event_id text
   `);
+  await sql.query(`
+    alter table time_off_requests
+      add column if not exists calendar_label text
+  `);
   await sql.query(`alter table officers add column if not exists shift_id text`);
   await sql.query(`alter table staff_accounts add column if not exists shift_id text`);
   await sql.query(`alter table staff_accounts add column if not exists active_shift_id text`);

@@ -119,16 +119,21 @@ export function officerFirstInitial(o: Pick<Officer, "name" | "lastName">): stri
  * just "ANDERSON" for every leave type except sick, which is "ANDERSON - SICK".
  * When another officer on the shift shares the last name: "A. ANDERSON" /
  * "A. ANDERSON - SICK". The leave type goes in the description instead.
+ * A supervisor-entered calendar label overrides this: "ANDERSON - <LABEL>".
  */
 export function leaveEventSummary(
   officer: Pick<Officer, "id" | "name" | "lastName">,
   shiftOfficers: Pick<Officer, "id" | "name" | "lastName">[],
   kind: string | null | undefined,
+  /** Supervisor-entered label (call-in). When set: "ANDERSON - <LABEL>". */
+  calendarLabel?: string | null,
 ): string {
   const last = officerLastName(officer);
   const shared = shiftOfficers.some((o) => o.id !== officer.id && officerLastName(o) === last);
   const initial = shared ? officerFirstInitial(officer) : "";
   const who = initial ? `${initial}. ${last}` : last;
+  const label = (calendarLabel ?? "").replace(/\s+/g, " ").trim().toUpperCase();
+  if (label) return `${who} - ${label}`;
   return kind === "sick" ? `${who} - SICK` : who;
 }
 
@@ -150,6 +155,17 @@ export function matchOfficersToEvent(
   title: string,
   officers: Officer[],
 ): string[] {
+  // "ANDERSON - <LABEL>": match on the name part so a label can't hit another
+  // officer's name. Fall back to the full title (e.g. "Vacation - Anderson").
+  const dash = title.indexOf(" - ");
+  if (dash > 0) {
+    const head = matchTitle(title.slice(0, dash), officers);
+    if (head.length) return head;
+  }
+  return matchTitle(title, officers);
+}
+
+function matchTitle(title: string, officers: Officer[]): string[] {
   const hay = ` ${title.toUpperCase().replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim()} `;
   const byLast = new Map<string, Officer[]>();
   for (const o of officers) {

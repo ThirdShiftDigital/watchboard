@@ -59,6 +59,7 @@ type RequestRow = {
   status: string;
   created_at: string;
   calendar_event_id?: string | null;
+  calendar_label?: string | null;
 };
 
 function mapOfficer(row: OfficerRow): Officer {
@@ -443,7 +444,7 @@ export const setRequestStatus = createServerFn({ method: "POST" })
     const { getSql } = await import("@/lib/db");
     const sql = await getSql();
     const existing = await sql<RequestRow>`
-      select id, officer_id, start_date, end_date, kind, reason, status, created_at::text as created_at, calendar_event_id
+      select id, officer_id, start_date, end_date, kind, reason, status, created_at::text as created_at, calendar_event_id, calendar_label
       from time_off_requests
       where id = ${data.id}
       limit 1
@@ -479,7 +480,7 @@ export const setRequestStatus = createServerFn({ method: "POST" })
           shiftId: shift.id,
           googleCalendar: Boolean(shift.googleCalendar),
           summary: officer
-            ? leaveEventSummary(officer, officers, row.kind)
+            ? leaveEventSummary(officer, officers, row.kind, row.calendar_label)
             : "LEAVE",
           startDate: row.start_date,
           endDate: row.end_date,
@@ -515,7 +516,7 @@ export const retryLeaveCalendar = createServerFn({ method: "POST" })
     const { getSql } = await import("@/lib/db");
     const sql = await getSql();
     const existing = await sql<RequestRow>`
-      select id, officer_id, start_date, end_date, kind, reason, status, created_at::text as created_at, calendar_event_id
+      select id, officer_id, start_date, end_date, kind, reason, status, created_at::text as created_at, calendar_event_id, calendar_label
       from time_off_requests
       where id = ${data.id}
       limit 1
@@ -538,7 +539,7 @@ export const retryLeaveCalendar = createServerFn({ method: "POST" })
       shiftId: shift.id,
       googleCalendar: Boolean(shift.googleCalendar),
       summary: officer
-            ? leaveEventSummary(officer, officers, row.kind)
+            ? leaveEventSummary(officer, officers, row.kind, row.calendar_label)
             : "LEAVE",
       startDate: row.start_date,
       endDate: row.end_date,
@@ -572,7 +573,7 @@ export const cancelMyRequest = createServerFn({ method: "POST" })
     const sql = await getSql();
     const existing = await sql<RequestRow>`
       select id, officer_id, start_date, end_date, kind, reason, status,
-             created_at::text as created_at, calendar_event_id
+             created_at::text as created_at, calendar_event_id, calendar_label
       from time_off_requests
       where id = ${data.id}
       limit 1
@@ -600,6 +601,7 @@ export const callInLeave = createServerFn({ method: "POST" })
       endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
       kind: z.enum(["vacation", "sick", "training", "court", "other"]),
       reason: z.string().max(280),
+      calendarLabel: z.string().max(40).optional(),
     }),
   )
   .handler(async ({ data, context }) => {
@@ -615,8 +617,8 @@ export const callInLeave = createServerFn({ method: "POST" })
     const sql = await getSql();
     const note = data.reason.trim() || "Called in";
     const rows = await sql<{ id: number }>`
-      insert into time_off_requests (officer_id, start_date, end_date, kind, reason, status)
-      values (${data.officerId}, ${data.startDate}, ${data.endDate}, ${data.kind}, ${note}, 'approved')
+      insert into time_off_requests (officer_id, start_date, end_date, kind, reason, status, calendar_label)
+      values (${data.officerId}, ${data.startDate}, ${data.endDate}, ${data.kind}, ${note}, 'approved', ${data.calendarLabel?.trim() || null})
       returning id
     `;
     const id = Number(rows[0]?.id);
@@ -629,7 +631,7 @@ export const callInLeave = createServerFn({ method: "POST" })
     const write = await writeApprovedLeave({
       shiftId: shift.id,
       googleCalendar: Boolean(shift.googleCalendar),
-      summary: leaveEventSummary(officer, officers, data.kind),
+      summary: leaveEventSummary(officer, officers, data.kind, data.calendarLabel),
       startDate: data.startDate,
       endDate: data.endDate,
       reason: leaveEventDescription(data.kind, note),
