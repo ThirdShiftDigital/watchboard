@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { REQUEST_KINDS, type RequestKind } from "@/lib/types";
+import { deriveLastName } from "@/lib/watch-logic";
 
 export type RequestPayload = {
   officerId: string;
@@ -15,6 +16,8 @@ export type RequestPayload = {
   endDate: string;
   kind: RequestKind;
   reason: string;
+  /** Call-in only: optional Google event label ("ANDERSON - <LABEL>"). */
+  calendarLabel?: string;
 };
 
 export function RequestForm({
@@ -41,6 +44,7 @@ export function RequestForm({
   const [startDate, setStartDate] = useState(initialStart);
   const [endDate, setEndDate] = useState(initialEnd || initialStart);
   const [reason, setReason] = useState("");
+  const [calendarLabel, setCalendarLabel] = useState("");
   const [picking, setPicking] = useState<"officer" | "kind" | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -59,6 +63,7 @@ export function RequestForm({
         endDate: endDate < startDate ? startDate : endDate,
         kind,
         reason,
+        ...(mode === "call-in" ? { calendarLabel: calendarLabel.trim() } : {}),
       });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not submit");
@@ -123,6 +128,30 @@ export function RequestForm({
           maxLength={280}
         />
       </Field>
+      {mode === "call-in" ? (
+        <Field label="Calendar label" optional>
+          <Input
+            value={calendarLabel}
+            onChange={(e) => setCalendarLabel(e.target.value)}
+            placeholder="Optional"
+            maxLength={40}
+            list="calendar-label-picks"
+            autoCapitalize="characters"
+          />
+          <datalist id="calendar-label-picks">
+            {REQUEST_KINDS.map((k) => (
+              <option key={k.id} value={k.label.toUpperCase()} />
+            ))}
+          </datalist>
+          <p className="text-xs text-muted">
+            Google Calendar title:{" "}
+            <span className="font-medium text-foreground">
+              {previewTitle(officer?.name, kind, calendarLabel)}
+            </span>
+            . Leave blank for just the last name (sick adds “- SICK”).
+          </p>
+        </Field>
+      ) : null}
     </>
   );
 
@@ -232,11 +261,28 @@ export function RequestForm({
   );
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function previewTitle(name: string | undefined, kind: RequestKind, label: string): string {
+  // Preview only — the server adds a first initial when a last name is shared.
+  const last = name ? deriveLastName(name) : "LASTNAME";
+  const tag = label.replace(/\s+/g, " ").trim().toUpperCase();
+  if (tag) return `${last} - ${tag}`;
+  return kind === "sick" ? `${last} - SICK` : last;
+}
+
+function Field({
+  label,
+  optional,
+  children,
+}: {
+  label: string;
+  optional?: boolean;
+  children: ReactNode;
+}) {
   return (
     <div className="space-y-2">
       <Label>
-        {label} {label !== "Notes" ? <span className="text-primary">*</span> : null}
+        {label}{" "}
+        {label !== "Notes" && !optional ? <span className="text-primary">*</span> : null}
       </Label>
       {children}
     </div>
