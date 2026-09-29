@@ -21,6 +21,7 @@ import {
   startOfMonth,
   startOfWeek,
   todayISO,
+  eventTouchesDate,
   weekdayOf,
 } from "@/lib/dates";
 import { callInLeave, connectGoogleCalendar, createRequest, disconnectGoogleCalendar, getCalendarFeed, getCalendarMonth, setCalendarFeed, setGoogleCalendarId, setRequestStatus } from "@/lib/fns";
@@ -93,11 +94,7 @@ function CalendarPage() {
     return { working, off };
   }, [officers, date, requests, events]);
 
-  const dayEvents = events.filter((e) => {
-    const start = e.start.slice(0, 10);
-    const end = (e.end ?? e.start).slice(0, 10);
-    return date >= start && date <= end;
-  });
+  const dayEvents = events.filter((e) => eventTouchesDate(e.start, e.end, date));
 
   async function removeLeave(id: number, name: string) {
     try {
@@ -258,11 +255,7 @@ function CalendarPage() {
           const selected = iso === date;
           const isToday = iso === today;
           const leave = approvedLeaveOnDate(iso, requests, officers);
-          const hits = events.filter((e) => {
-            const start = e.start.slice(0, 10);
-            const end = (e.end ?? e.start).slice(0, 10);
-            return iso >= start && iso <= end;
-          });
+          const hits = events.filter((e) => eventTouchesDate(e.start, e.end, iso));
           return (
             <button
               key={iso}

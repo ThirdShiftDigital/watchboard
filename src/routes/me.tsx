@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { RedirectToSignIn, UserButton } from "@/lib/auth/gates";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { cn } from "@/lib/cn";
-import { addDays, formatLong, formatShort, formatStamp, startOfWeek, todayISO } from "@/lib/dates";
+import { addDays, eventDayRange, eventOverlapsRange, formatLong, formatShort, formatStamp, startOfWeek, todayISO } from "@/lib/dates";
 import { cancelMyRequest, createRequest, getOfficerPortal } from "@/lib/fns";
 import { useMyAccess } from "@/lib/hooks";
 import { useOfficerSession } from "@/lib/officer-session";
@@ -59,11 +59,7 @@ function OfficerPage() {
   }, [officer, weekStart, requests, events]);
 
   const weekLeave = useMemo(() => {
-    return events.filter((e) => {
-      const start = e.start.slice(0, 10);
-      const end = (e.end ?? e.start).slice(0, 10);
-      return end >= weekStart && start <= addDays(weekStart, 6);
-    });
+    return events.filter((e) => eventOverlapsRange(e.start, e.end, weekStart, addDays(weekStart, 6)));
   }, [events, weekStart]);
 
   async function submitRequest(payload: {
@@ -234,10 +230,12 @@ function OfficerPage() {
                     <li key={e.id} className="px-4 py-3">
                       <p className="text-sm">{e.title}</p>
                       <p className="text-xs text-muted">
-                        {formatShort(e.start.slice(0, 10))}
-                        {e.end && e.end.slice(0, 10) !== e.start.slice(0, 10)
-                          ? ` – ${formatShort(e.end.slice(0, 10))}`
-                          : ""}
+                        {(() => {
+                          const span = eventDayRange(e.start, e.end);
+                          return span.end !== span.start
+                            ? `${formatShort(span.start)} – ${formatShort(span.end)}`
+                            : formatShort(span.start);
+                        })()}
                       </p>
                     </li>
                   ))}

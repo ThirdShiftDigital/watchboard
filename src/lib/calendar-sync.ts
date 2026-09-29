@@ -8,6 +8,7 @@ import {
   type CalendarWriteFailure,
 } from "@/lib/google-calendar";
 import { getConnectorAccessToken } from "@/lib/app-data/client.server";
+import { addDays, endOfMonth, eventOverlapsRange, inclusiveAllDayEnd, startOfMonth } from "@/lib/dates";
 import { normalizeFeedUrl, parseIcsEvents } from "@/lib/ics";
 import type { CalendarEvent, CalendarState, Officer, Shift } from "@/lib/types";
 import { matchOfficersToEvent } from "@/lib/watch-logic";
@@ -33,28 +34,72 @@ function mapCache(row: CacheRow): CalendarEvent {
   };
 }
 
+/**
+ * Cache window stamp stored on shifts.calendar_cache_window:
+ * "v2:<from>:<to>" (agency-local days). v2 rows hold inclusive all-day ends;
+ * anything else is a pre-v2 cache whose all-day ends are Google's exclusive
+ * date and whose window is unknown.
+ */
+const CACHE_VERSION = "v2";
+
+function parseWindow(raw: string | null | undefined): { from: string; to: string } | null {
+  const m = /^v2:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/.exec(raw ?? "");
+  return m ? { from: m[1], to: m[2] } : null;
+}
+
+/** Google window to fetch/cache for a request: whole month(s) plus a margin. */
+function cacheWindowFor(timeMin: string, timeMax: string): { from: string; to: string } {
+  return {
+    from: addDays(startOfMonth(timeMin), -7),
+    to: addDays(endOfMonth(timeMax), 14),
+  };
+}
+
 async function loadCache(shiftId: string, officers: Officer[]): Promise<CalendarEvent[]> {
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
-  const rows = await sql<CacheRow>`
-    select event_id, title, start_at, end_at, all_day from calendar_cache where shift_id = ${shiftId}
-  `;
+  const [rows, meta] = await Promise.all([
+    sql<CacheRow>`
+      select event_id, title, start_at, end_at, all_day from calendar_cache where shift_id = ${shiftId}
+    `,
+    sql<{ calendar_cache_window: string | null }>`
+      select calendar_cache_window from shifts where id = ${shiftId}
+    `,
+  ]);
+  const legacy = !parseWindow(meta[0]?.calendar_cache_window);
   return rows.map((row) => {
     const event = mapCache(row);
+    // Pre-v2 rows stored Google's exclusive all-day end — show the real last day.
+    if (legacy && event.allDay && event.end && /^\d{4}-\d{2}-\d{2}$/.test(event.end)) {
+      event.end = inclusiveAllDayEnd(event.start, event.end);
+    }
     return { ...event, matchedOfficerIds: matchOfficersToEvent(event.title, officers) };
   });
 }
 
-async function saveCache(shiftId: string, events: CalendarEvent[]) {
+async function saveCache(
+  shiftId: string,
+  events: CalendarEvent[],
+  window: { from: string; to: string },
+) {
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
+  const rows = events.slice(0, 1000).map((e) => ({
+    event_id: e.id,
+    title: e.title,
+    start_at: e.start,
+    end_at: e.end,
+    all_day: e.allDay,
+  }));
   await sql`delete from calendar_cache where shift_id = ${shiftId}`;
-  // Sequential writes — parallel inserts grab many pool clients and trip
-  // Supabase session-mode EMAXCONNSESSION (pool_size often 15).
-  for (const event of events.slice(0, 200)) {
+  // One statement for all rows — no per-row round trips or parallel clients
+  // (Supabase session-mode pooler caps clients; see EMAXCONNSESSION).
+  if (rows.length) {
     await sql`
       insert into calendar_cache (shift_id, event_id, title, start_at, end_at, all_day)
-      values (${shiftId}, ${event.id}, ${event.title}, ${event.start}, ${event.end}, ${event.allDay})
+      select ${shiftId}, x.event_id, x.title, x.start_at, x.end_at, coalesce(x.all_day, false)
+      from jsonb_to_recordset(${JSON.stringify(rows)}::jsonb)
+        as x(event_id text, title text, start_at text, end_at text, all_day boolean)
       on conflict (shift_id, event_id) do update set
         title = excluded.title,
         start_at = excluded.start_at,
@@ -63,8 +108,15 @@ async function saveCache(shiftId: string, events: CalendarEvent[]) {
     `;
   }
   await sql`
-    update shifts set calendar_synced_at = now() where id = ${shiftId}
+    update shifts set
+      calendar_synced_at = now(),
+      calendar_cache_window = ${`${CACHE_VERSION}:${window.from}:${window.to}`}
+    where id = ${shiftId}
   `;
+}
+
+function inRange(events: CalendarEvent[], from: string, to: string): CalendarEvent[] {
+  return events.filter((e) => eventOverlapsRange(e.start, e.end, from, to));
 }
 
 function mergeEvents(primary: CalendarEvent[], extra: CalendarEvent[]): CalendarEvent[] {
@@ -116,23 +168,20 @@ async function fetchIcs(
 async function recentCalendarCache(
   shiftId: string,
   officers: Officer[],
+  timeMin: string,
+  timeMax: string,
 ): Promise<CalendarEvent[] | null> {
-  const cached = await loadCache(shiftId, officers);
-  if (!cached.length) return null;
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
-  const meta = await sql<{ synced: string | null }>`
-    select calendar_synced_at::text as synced from shifts where id = ${shiftId}
+  const meta = await sql<{ synced: string | null; calendar_cache_window: string | null }>`
+    select calendar_synced_at::text as synced, calendar_cache_window from shifts where id = ${shiftId}
   `;
   const synced = meta[0]?.synced ? Date.parse(meta[0].synced) : NaN;
-  // Missing stamp: treat existing rows as fresh once so we do not pay Google
-  // on the first load after this deploy.
-  if (!Number.isFinite(synced)) {
-    await sql`update shifts set calendar_synced_at = now() where id = ${shiftId}`;
-    return cached;
-  }
-  if (Date.now() - synced > CALENDAR_CACHE_TTL_MS) return null;
-  return cached;
+  if (!Number.isFinite(synced) || Date.now() - synced > CALENDAR_CACHE_TTL_MS) return null;
+  // Only serve the cache when it was filled for a window covering this request.
+  const window = parseWindow(meta[0]?.calendar_cache_window);
+  if (!window || window.from > timeMin || window.to < timeMax) return null;
+  return loadCache(shiftId, officers);
 }
 
 /** DB-only leave events for Save — no Google/ICS round-trip. */
@@ -154,9 +203,9 @@ export async function loadShiftCalendar(input: {
 
   // Google cache first — Zones Save/refetch must not wait on ICS when fresh.
   if (shift.googleCalendar) {
-    const fresh = await recentCalendarCache(shift.id, officers);
+    const fresh = await recentCalendarCache(shift.id, officers, timeMin, timeMax);
     if (fresh) {
-      return { kind: "ok", source: "google", events: fresh };
+      return { kind: "ok", source: "google", events: inRange(fresh, timeMin, timeMax) };
     }
   }
 
@@ -177,16 +226,23 @@ export async function loadShiftCalendar(input: {
     };
   }
 
+  // Fetch/cache whole month(s) so the Watch (one day) and Calendar (month)
+  // share one cache instead of overwriting each other's window.
+  const win = cacheWindowFor(timeMin, timeMax);
+
   // Prefer standalone OAuth tokens stored on the shift (Netlify).
   const { getValidAccessTokenForShift } = await import("@/lib/google-oauth");
   const oauth = await getValidAccessTokenForShift(shift.id).catch(() => null);
   if (oauth?.accessToken) {
-    const google = await fetchGoogleCalendarOAuth(shift.id, officers, timeMin, timeMax);
+    const google = await fetchGoogleCalendarOAuth(shift.id, officers, win.from, win.to);
     if (google.kind === "ok") {
-      await saveCache(shift.id, google.events).catch(() => undefined);
+      await saveCache(shift.id, google.events, win).catch(() => undefined);
       return {
         ...google,
-        events: mergeEvents(google.events, ics?.kind === "ok" ? ics.events : []),
+        events: mergeEvents(
+          inRange(google.events, timeMin, timeMax),
+          ics?.kind === "ok" ? ics.events : [],
+        ),
       };
     }
     if (google.kind === "login" && canConnect) {
@@ -196,12 +252,15 @@ export async function loadShiftCalendar(input: {
 
   const hasToken = Boolean(getConnectorAccessToken());
   if (hasToken || canConnect) {
-    const google = await fetchGoogleCalendar(officers, timeMin, timeMax);
+    const google = await fetchGoogleCalendar(officers, win.from, win.to);
     if (google.kind === "ok") {
-      await saveCache(shift.id, google.events).catch(() => undefined);
+      await saveCache(shift.id, google.events, win).catch(() => undefined);
       return {
         ...google,
-        events: mergeEvents(google.events, ics?.kind === "ok" ? ics.events : []),
+        events: mergeEvents(
+          inRange(google.events, timeMin, timeMax),
+          ics?.kind === "ok" ? ics.events : [],
+        ),
       };
     }
     if ((google.kind === "login" || google.kind === "pending") && canConnect) {
@@ -280,7 +339,9 @@ export async function connectShiftGoogle(
     const { getSql } = await import("@/lib/db");
     const sql = await getSql();
     await sql`update shifts set google_calendar = true where id = ${shiftId}`;
-    await saveCache(shiftId, probe.events).catch(() => undefined);
+    await saveCache(shiftId, probe.events, { from: today, to: addDays(today, 1) }).catch(
+      () => undefined,
+    );
     return { connected: true };
   }
   if (probe.kind === "pending") {

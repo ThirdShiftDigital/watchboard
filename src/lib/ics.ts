@@ -1,4 +1,4 @@
-import { addDays } from "./dates";
+import { addDays, eventOverlapsRange, toAgencyLocal } from "./dates";
 import type { CalendarEvent, Officer } from "./types";
 import { matchOfficersToEvent } from "./watch-logic";
 
@@ -47,9 +47,7 @@ export function parseIcsEvents(
     }
     const start = startParsed.iso;
     const end = endParsed?.iso ?? null;
-    const startDay = start.slice(0, 10);
-    const endDay = (end ?? start).slice(0, 10);
-    if (endDay < rangeStart || startDay > rangeEnd) {
+    if (!eventOverlapsRange(start, end, rangeStart, rangeEnd)) {
       index += 1;
       continue;
     }
@@ -115,12 +113,12 @@ function parseIcsDate(value: string): { iso: string; allDay: boolean } | null {
   if (dateOnly) {
     return { iso: `${dateOnly[1]}-${dateOnly[2]}-${dateOnly[3]}`, allDay: true };
   }
-  const dateTime = compact.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z?$/);
+  const dateTime = compact.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/i);
   if (dateTime) {
-    return {
-      iso: `${dateTime[1]}-${dateTime[2]}-${dateTime[3]}T${dateTime[4]}:${dateTime[5]}:${dateTime[6]}`,
-      allDay: false,
-    };
+    const naive = `${dateTime[1]}-${dateTime[2]}-${dateTime[3]}T${dateTime[4]}:${dateTime[5]}:${dateTime[6]}`;
+    // "…Z" is UTC: convert so an 8 PM Central event is not filed under tomorrow.
+    // TZID/floating times are treated as agency-local wall clock.
+    return { iso: dateTime[7] ? toAgencyLocal(`${naive}Z`) : naive, allDay: false };
   }
   return null;
 }
