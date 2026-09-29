@@ -83,6 +83,7 @@ export async function ensureShifts() {
   await sql.query(`alter table shifts add column if not exists google_calendar_id text`);
   await sql.query(`alter table shifts add column if not exists google_connected_by text`);
   await sql.query(`alter table shifts add column if not exists calendar_synced_at timestamptz`);
+  await sql.query(`alter table shifts add column if not exists calendar_cache_window text`);
   await sql.query(`
     create table if not exists calendar_cache (
       shift_id   text not null,

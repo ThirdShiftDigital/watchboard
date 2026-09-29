@@ -4,7 +4,7 @@ import {
   GoogleCalendarTools,
 } from "@/lib/app-data";
 import { callTool } from "@/lib/app-data/client.server";
-import { addDays } from "@/lib/dates";
+import { addDays, AGENCY_TIME_ZONE, eventOverlapsRange, inclusiveAllDayEnd } from "@/lib/dates";
 import type { CalendarEvent, CalendarState, Officer } from "@/lib/types";
 import { matchOfficersToEvent } from "@/lib/watch-logic";
 
@@ -51,14 +51,18 @@ export function parseCalendarEvents(data: unknown, officers: Officer[]): Calenda
       const end = dateFromUnknown(rec.end) || pickString(rec, ["end", "endTime"]) || null;
       if (!start) return null;
       const id = pickString(rec, ["id", "eventId", "iCalUID"]) || `evt-${index}`;
-      const allDay =
-        rec.allDay === true ||
-        (typeof rec.start === "string" && rec.start.length === 10);
+      // Google all-day events are { start: { date }, end: { date } } with an
+      // EXCLUSIVE end date (a one-day event on the 28th ends on the 29th).
+      const allDay = rec.allDay === true || /^\d{4}-\d{2}-\d{2}$/.test(start);
+      const inclusiveEnd =
+        allDay && (!end || /^\d{4}-\d{2}-\d{2}$/.test(end))
+          ? inclusiveAllDayEnd(start, end)
+          : end;
       return {
         id,
         title,
         start,
-        end,
+        end: inclusiveEnd,
         allDay,
         matchedOfficerIds: matchOfficersToEvent(title, officers),
       } satisfies CalendarEvent;
@@ -204,39 +208,52 @@ export async function fetchGoogleCalendarOAuth(
     };
   }
   const calendarId = encodeURIComponent(tokens.calendarId || "primary");
-  const params = new URLSearchParams({
-    timeMin: `${timeMin}T00:00:00.000Z`,
-    timeMax: `${timeMax}T23:59:59.999Z`,
-    singleEvents: "true",
-    orderBy: "startTime",
-    maxResults: "100",
-  });
-  const res = await fetch(
-    `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?${params}`,
-    { headers: { Authorization: `Bearer ${tokens.accessToken}` } },
-  );
-  if (res.status === 401 || res.status === 403) {
-    return {
-      kind: "login",
-      source: "google",
-      message: "Google Calendar authorization expired. Connect again.",
-      events: [],
-    };
+  // The window is agency-local days. Pad a day on each side in UTC (Central is
+  // UTC-5/-6) and filter to the exact local days after parsing.
+  const items: unknown[] = [];
+  let pageToken = "";
+  for (let page = 0; page < 5; page += 1) {
+    const params = new URLSearchParams({
+      timeMin: `${addDays(timeMin, -1)}T00:00:00Z`,
+      timeMax: `${addDays(timeMax, 2)}T00:00:00Z`,
+      timeZone: AGENCY_TIME_ZONE,
+      singleEvents: "true",
+      orderBy: "startTime",
+      maxResults: "250",
+    });
+    if (pageToken) params.set("pageToken", pageToken);
+    const res = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?${params}`,
+      { headers: { Authorization: `Bearer ${tokens.accessToken}` } },
+    );
+    if (res.status === 401 || res.status === 403) {
+      return {
+        kind: "login",
+        source: "google",
+        message: "Google Calendar authorization expired. Connect again.",
+        events: [],
+      };
+    }
+    if (!res.ok) {
+      const text = await res.text();
+      return {
+        kind: "error",
+        source: "google",
+        message: `Google Calendar API error (${res.status}): ${text.slice(0, 160)}`,
+        events: [],
+      };
+    }
+    const data = (await res.json()) as { items?: unknown[]; nextPageToken?: string };
+    items.push(...(data.items ?? []));
+    if (!data.nextPageToken) break;
+    pageToken = data.nextPageToken;
   }
-  if (!res.ok) {
-    const text = await res.text();
-    return {
-      kind: "error",
-      source: "google",
-      message: `Google Calendar API error (${res.status}): ${text.slice(0, 160)}`,
-      events: [],
-    };
-  }
-  const data = (await res.json()) as { items?: unknown[] };
   return {
     kind: "ok",
     source: "google",
-    events: parseCalendarEvents({ items: data.items ?? [] }, officers),
+    events: parseCalendarEvents({ items }, officers).filter((e) =>
+      eventOverlapsRange(e.start, e.end, timeMin, timeMax),
+    ),
   };
 }
 
