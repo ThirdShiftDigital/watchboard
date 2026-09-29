@@ -145,7 +145,9 @@ export function formatShort(iso: string): string {
 export function formatStamp(value: string): string {
   const d = parseStamp(value);
   if (!d) return "";
+  // Show request/decision times in agency time, whatever zone the phone is set to.
   return d.toLocaleString("en-US", {
+    timeZone: AGENCY_TIME_ZONE,
     month: "short",
     day: "numeric",
     year: "numeric",

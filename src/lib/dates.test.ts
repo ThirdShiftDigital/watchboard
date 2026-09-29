@@ -7,8 +7,12 @@ import {
   eventOverlapsRange,
   eventTouchesDate,
   inclusiveAllDayEnd,
+  addDays,
+  formatShort,
+  formatStamp,
   todayISO,
   toAgencyLocal,
+  weekdayOf,
 } from "./dates.ts";
 
 describe("agency 'today' (America/Chicago)", () => {
@@ -81,5 +85,18 @@ describe("month helpers", () => {
     assert.equal(endOfMonth("2026-09-15"), "2026-09-30");
     assert.equal(endOfMonth("2026-02-03"), "2026-02-28");
     assert.equal(endOfMonth("2026-12-31"), "2026-12-31");
+  });
+});
+
+describe("device time zone does not matter", () => {
+  // Run under TZ=UTC / TZ=Pacific/Kiritimati / TZ=Pacific/Pago_Pago: same answers.
+  it("calendar-date math is zone-independent", () => {
+    assert.equal(addDays("2026-09-29", -1), "2026-09-28");
+    assert.equal(addDays("2026-11-01", 1), "2026-11-02"); // DST end
+    assert.equal(weekdayOf("2026-09-29"), 2); // Tuesday
+    assert.equal(formatShort("2026-09-29"), "Sep 29");
+  });
+  it("timestamps render in Central", () => {
+    assert.match(formatStamp("2026-09-29T23:43:00Z"), /Sep 29, 2026.*6:43/);
   });
 });
