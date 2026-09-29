@@ -192,6 +192,71 @@ export async function peekCalendarCache(
   return loadCache(shiftId, officers);
 }
 
+/**
+ * Zones board read (getWatch): calendar_cache only — never Google, never ICS,
+ * never a token refresh. Returns whatever is cached for the range plus
+ * `stale: true` when the cache is past its TTL, has no v2 window stamp, or
+ * does not cover the range, so the client can refresh it in the background
+ * with refreshShiftCalendarCache. Zones load / Save refetch must stay fast even
+ * when Google is slow (see PRs #14/#18).
+ */
+export async function readShiftCalendarCache(input: {
+  shiftId: string;
+  officers: Officer[];
+  timeMin: string;
+  timeMax: string;
+}): Promise<CalendarState & { stale: boolean }> {
+  const { shiftId, officers, timeMin, timeMax } = input;
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const meta = await sql<{ synced: string | null; calendar_cache_window: string | null }>`
+    select calendar_synced_at::text as synced, calendar_cache_window from shifts where id = ${shiftId}
+  `;
+  const synced = meta[0]?.synced ? Date.parse(meta[0].synced) : NaN;
+  const window = parseWindow(meta[0]?.calendar_cache_window);
+  const fresh =
+    Number.isFinite(synced) &&
+    Date.now() - synced <= CALENDAR_CACHE_TTL_MS &&
+    Boolean(window && window.from <= timeMin && window.to >= timeMax);
+  const cached = await loadCache(shiftId, officers);
+  return {
+    kind: "ok",
+    source: "google",
+    events: inRange(cached, timeMin, timeMax),
+    stale: !fresh,
+  };
+}
+
+/**
+ * Background refresh for the Zones board: re-fetch Google into calendar_cache
+ * when the cache is stale for this range. Reports whether the cache was
+ * actually rewritten so the client only refetches the board when it changed.
+ */
+export async function refreshShiftCalendarCache(input: {
+  shift: Pick<Shift, "id" | "calendarFeedUrl" | "googleCalendar">;
+  officers: Officer[];
+  timeMin: string;
+  timeMax: string;
+  canConnect: boolean;
+}): Promise<{ refreshed: boolean }> {
+  const { shift, officers, timeMin, timeMax, canConnect } = input;
+  if (!shift.googleCalendar) return { refreshed: false };
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const stamp = async () => {
+    const rows = await sql<{ synced: string | null; calendar_cache_window: string | null }>`
+      select calendar_synced_at::text as synced, calendar_cache_window from shifts where id = ${shift.id}
+    `;
+    return `${rows[0]?.synced ?? ""}|${rows[0]?.calendar_cache_window ?? ""}`;
+  };
+  const before = await stamp();
+  // loadShiftCalendar serves a fresh covering cache without Google, otherwise
+  // fetches Google and rewrites the cache.
+  await loadShiftCalendar({ shift, officers, timeMin, timeMax, canConnect });
+  const after = await stamp();
+  return { refreshed: before !== after };
+}
+
 export async function loadShiftCalendar(input: {
   shift: Pick<Shift, "id" | "calendarFeedUrl" | "googleCalendar">;
   officers: Officer[];

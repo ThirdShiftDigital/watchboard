@@ -151,6 +151,12 @@ export type CalendarState = {
   message?: string;
   loginUrl?: string;
   events: CalendarEvent[];
+  /**
+   * Served from calendar_cache without asking Google, and the cache is older
+   * than its TTL or does not cover this range. The Zones page refreshes it in
+   * the background (refreshWatchCalendar) instead of blocking on Google.
+   */
+  stale?: boolean;
 };
 
 export type WatchRow = {

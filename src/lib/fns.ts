@@ -23,6 +23,8 @@ import {
   selectShiftGoogleCalendar,
   loadShiftCalendar,
   peekCalendarCache,
+  readShiftCalendarCache,
+  refreshShiftCalendarCache,
   removeApprovedLeave,
   writeApprovedLeave,
   type LeaveCalendarWrite,
@@ -184,22 +186,32 @@ export const getWatch = createServerFn({ method: "POST" })
       loadAssignments(date, shift.id),
       accessFor(context.userId),
     ]);
-    const calendar = await fetchCalendar(officers, date, date, shift, access.caps.editWatch);
+    // Google shifts: calendar_cache only — Zones load and the post-Save refetch
+    // must never wait on Google (token refresh / events.list). A stale cache is
+    // refreshed in the background by the client via refreshWatchCalendar.
+    const calendar: CalendarState = shift.googleCalendar
+      ? await readShiftCalendarCache({ shiftId: shift.id, officers, timeMin: date, timeMax: date })
+      : await fetchCalendar(officers, date, date, shift, access.caps.editWatch);
     let assignments = existing;
     let rows = buildRows(officers, weekday, date, requests, calendar.events, assignments);
-    const workingIds = new Set(
-      rows.filter((r) => r.status === "working").map((r) => r.officer.id),
-    );
-    const stale = assignments.filter((a) => !workingIds.has(a.officerId));
+    const statusById = new Map(rows.map((r) => [r.officer.id, r.status]));
+    // Drop zones for officers who are off — but never on the strength of a
+    // stale calendar cache alone (the event may already be gone in Google).
+    const stale = assignments.filter((a) => {
+      const status = statusById.get(a.officerId);
+      if (status === "working") return false;
+      if (status === "calendar" && calendar.stale) return false;
+      return true;
+    });
     if (stale.length) {
       const { getSql } = await import("@/lib/db");
       const sql = await getSql();
-      const staleIds = stale.map((a) => a.officerId);
       await sql`
         delete from zone_assignments
-        where date = ${date} and officer_id = any(${staleIds}::text[])
+        where date = ${date} and officer_id = any(${stale.map((a) => a.officerId)}::text[])
       `;
-      assignments = assignments.filter((a) => workingIds.has(a.officerId));
+      const staleIds = new Set(stale.map((a) => a.officerId));
+      assignments = assignments.filter((a) => !staleIds.has(a.officerId));
       rows = buildRows(officers, weekday, date, requests, calendar.events, assignments);
     }
     const workingCount = rows.filter((r) => r.status === "working").length;
@@ -220,6 +232,40 @@ export const getWatch = createServerFn({ method: "POST" })
       minWorking: shift.minWorking,
       shiftName: shift.name,
     };
+  });
+
+/**
+ * Background Google refresh for the Zones board. The client calls this after
+ * getWatch reports `calendar.stale`; it never blocks Zones load or Save.
+ */
+export const refreshWatchCalendar = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(dateInput)
+  .handler(async ({ data, context }) => {
+    await requireCap(context.userId, "viewBoard");
+    const shift = await currentShiftFor(context.userId);
+    if (!shift.googleCalendar) return { refreshed: false };
+    const [officers, access] = await Promise.all([
+      loadOfficers(shift.id),
+      accessFor(context.userId),
+    ]);
+    return refreshShiftCalendarCache({
+      shift: {
+        id: shift.id,
+        calendarFeedUrl: shift.calendarFeedUrl,
+        googleCalendar: true,
+      },
+      officers,
+      timeMin: data.date,
+      timeMax: data.date,
+      canConnect: access.caps.editWatch,
+    }).catch((e: unknown) => {
+      console.error("[calendar] background refresh failed", {
+        shiftId: shift.id,
+        error: e instanceof Error ? e.message.slice(0, 200) : String(e),
+      });
+      return { refreshed: false };
+    });
   });
 
 export const rebuildWatch = createServerFn({ method: "POST" })
