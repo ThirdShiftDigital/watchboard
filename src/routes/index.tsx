@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { ArrowUpDown, Check, ChevronRight, Plus, RefreshCw, Share2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AppShell, HeaderIconButton } from "@/components/app-shell";
 import { PublicHomePage } from "@/components/public-home";
@@ -13,7 +13,14 @@ import { ZoneOrderSheet } from "@/components/zone-order-sheet";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
-import { deleteAssignment, getWatch, rebuildWatch, setZoneOrder, upsertAssignment } from "@/lib/fns";
+import {
+  deleteAssignment,
+  getWatch,
+  rebuildWatch,
+  refreshWatchCalendar,
+  setZoneOrder,
+  upsertAssignment,
+} from "@/lib/fns";
 import { useMyAccess, usePendingCount, useSupervisorReady } from "@/lib/hooks";
 import { useWatchDate } from "@/lib/store";
 import { DEFAULT_ZONE_ORDER, zoneHint } from "@/lib/types";
@@ -59,6 +66,27 @@ function ZonesPage() {
     queryFn: () => getWatch({ data: { date } }),
     enabled: ready,
   });
+
+  // getWatch reads Google leave from the DB cache only. When that cache is
+  // stale, refresh it from Google in the background (never blocking the board,
+  // the zone picker, or Save) and refetch the board only if the cache changed.
+  const calendarStale = Boolean(watchQuery.data?.calendar.stale);
+  const lastCalendarRefresh = useRef(new Map<string, number>());
+  useEffect(() => {
+    if (!calendarStale) return;
+    const last = lastCalendarRefresh.current.get(date) ?? 0;
+    if (Date.now() - last < 60_000) return;
+    lastCalendarRefresh.current.set(date, Date.now());
+    refreshWatchCalendar({ data: { date } })
+      .then((res) => {
+        // A Save in flight refetches on success anyway — don't race its
+        // optimistic zone with an older board.
+        if (res.refreshed && queryClient.isMutating() === 0) {
+          void queryClient.invalidateQueries({ queryKey: ["watch", date] });
+        }
+      })
+      .catch(() => undefined);
+  }, [calendarStale, date, queryClient]);
 
   const rebuild = useMutation({
     mutationFn: () => rebuildWatch({ data: { date } }),
