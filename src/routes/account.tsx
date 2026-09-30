@@ -102,14 +102,19 @@ function AccountPage() {
         </div>
 
         {staffQuery.data?.resets.length ? (
-          <div className="max-h-28 shrink-0 overflow-y-auto rounded-lg border border-border bg-card">
+          <div className="max-h-40 shrink-0 overflow-y-auto rounded-lg border border-border bg-card">
             <p className="sticky top-0 border-b border-border bg-card px-3 py-2 text-2xs uppercase tracking-wide text-muted">
               Pending reset codes
             </p>
             <ul>
               {staffQuery.data.resets.map((r) => (
                 <li key={r.id} className="flex items-center justify-between gap-3 px-3 py-2">
-                  <span className="truncate text-sm">{r.email}</span>
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm">{r.name || r.email}</span>
+                    <span className="block truncate text-2xs text-muted">
+                      {r.email} · expires {formatStamp(r.expiresAt)}
+                    </span>
+                  </span>
                   <span className="font-display text-lg font-semibold tracking-wide">{r.code}</span>
                 </li>
               ))}

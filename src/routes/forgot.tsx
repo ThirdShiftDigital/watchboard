@@ -12,8 +12,7 @@ export const Route = createFileRoute("/forgot")({ component: ForgotPage });
 function ForgotPage() {
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
-  const [code, setCode] = useState<string | null>(null);
-  const [sent, setSent] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
 
   return (
     <main className="grid min-h-dvh place-items-center bg-background px-6">
@@ -22,23 +21,11 @@ function ForgotPage() {
           <BrandLockup className="mx-auto w-full max-w-[20rem]" />
           <p className="text-2xs uppercase tracking-wide text-muted">Forgot password</p>
         </div>
-        {sent ? (
+        {message ? (
           <div className="rounded-lg border border-border bg-card px-5 py-6 text-center">
-            <p className="font-display text-xl font-semibold uppercase tracking-wide">
-              {code ? "Your reset code" : "Request in"}
-            </p>
-            {code ? (
-              <>
-                <p className="mt-4 font-display text-4xl font-semibold tracking-[0.25em]">{code}</p>
-                <p className="mt-3 text-sm text-muted">
-                  Use this code in the next two hours to set a new supervisor password.
-                </p>
-              </>
-            ) : (
-              <p className="mt-3 text-sm text-muted">
-                If that email has an account, a shift admin can also read the code on Accounts.
-              </p>
-            )}
+            <p className="font-display text-xl font-semibold uppercase tracking-wide">Request in</p>
+            <p className="mt-3 text-sm text-muted">{message}</p>
+            <p className="mt-2 text-xs text-subtle">Codes expire after 45 minutes.</p>
             <Button className="mt-6 w-full" asChild>
               <Link to="/reset" search={{ email }}>
                 Set new password
@@ -53,8 +40,7 @@ function ForgotPage() {
               setBusy(true);
               try {
                 const result = await requestPasswordReset({ data: { email: email.trim() } });
-                setCode(result.code ?? null);
-                setSent(true);
+                setMessage(result.message);
               } catch (err) {
                 toast.error(err instanceof Error ? err.message : "Could not send reset");
               } finally {
@@ -63,8 +49,8 @@ function ForgotPage() {
             }}
           >
             <p className="text-sm text-muted">
-              Enter the email on your supervisor account. WatchBoard shows the
-              reset code here so you can get back in without email.
+              Enter the email on your account. Your shift commander will see a reset code on
+              Accounts and can give it to you.
             </p>
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
@@ -78,7 +64,7 @@ function ForgotPage() {
               />
             </div>
             <Button className="w-full" type="submit" disabled={busy || !email}>
-              {busy ? "Sending…" : "Get reset code"}
+              {busy ? "Sending…" : "Request reset"}
             </Button>
           </form>
         )}

@@ -179,6 +179,22 @@ export async function ensureTables() {
     )
   `);
   await sql.query(`alter table agency_members add column if not exists agency_admin boolean not null default false`);
+  // Reset codes are bound to one login, capped on wrong guesses, and never shown
+  // to the requester (see reset-codes.ts).
+  await sql.query(`alter table password_resets add column if not exists user_id text`);
+  await sql.query(`alter table password_resets add column if not exists attempts integer not null default 0`);
+  await sql.query(`
+    create table if not exists password_reset_log (
+      id          serial primary key,
+      kind        text not null,
+      email       text not null,
+      ip          text not null,
+      created_at  timestamptz not null default now()
+    )
+  `);
+  // Codes issued before this change were displayed on /forgot to whoever asked;
+  // retire any still outstanding.
+  await sql`update password_resets set used = true where user_id is null and used = false`;
   const cleared = await sql<{ value: string }>`
     select value from schedule_meta where key = 'demo_cleared'
   `;
@@ -750,15 +766,18 @@ export const listStaff = createServerFn({ method: "POST" })
         )
       order by permission, name
     `;
-    const emails = people.map((p) => p.email.toLowerCase());
-    const resets = emails.length
-      ? await sql<ResetRow>`
-          select id, email, code, expires_at::text as expires_at, used
-          from password_resets
-          where used = false
-          order by created_at desc
-        `
-      : [];
+    // Pending reset codes for anyone the caller may manage (not only this
+    // shift's list: division leaders cover commanders and the whole agency).
+    const resets = await sql<ResetRow & StaffRow & { agency_admin: boolean | null }>`
+      select r.id, r.email, r.code, to_char(r.expires_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as expires_at, r.used,
+             s.user_id, s.name, s.permission, s.officer_id, s.shift_id, s.active_shift_id,
+             s.agency_id, s.is_owner, m.agency_admin
+      from password_resets r
+      join staff_accounts s on s.user_id = r.user_id
+      left join agency_members m on m.user_id = s.user_id and m.agency_id = s.agency_id
+      where r.used = false and r.expires_at > now() and r.user_id is not null
+      order by r.created_at desc
+    `;
     const officers = shiftId
       ? await sql<{ id: string; name: string }>`
           select id, name from officers where shift_id = ${shiftId} order by rank_sort, name
@@ -822,9 +841,13 @@ export const listStaff = createServerFn({ method: "POST" })
         };
       }),
       resets: resets
-        .filter((r) => emails.includes(r.email.toLowerCase()))
+        .filter(
+          (r) =>
+            staffManageBlock(actor, staffTargetFor(mapStaff(r), Boolean(r.agency_admin))) === null,
+        )
         .map((r) => ({
           id: r.id,
+          name: r.name,
           email: r.email,
           code: r.code,
           expiresAt: r.expires_at,
@@ -1179,54 +1202,127 @@ export const changeMyPassword = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
+/**
+ * Start a reset. Never returns the code and answers the same whether or not
+ * the email has an account; the code shows in Accounts for whoever may manage
+ * that login. Rate-limited per email and per client IP.
+ */
 export const requestPasswordReset = createServerFn({ method: "POST" })
-  .validator(z.object({ email: z.string().email() }))
+  .validator(z.object({ email: z.string().email().max(254) }))
   .handler(async ({ data }) => {
     await ensureTables();
-    const email = data.email.trim().toLowerCase();
-    await ensureUserForEmail(email);
+    const R = await import("@/lib/reset-codes");
+    const { clientIp } = await import("@/lib/request-ip.server");
+    const email = emailKey(data.email);
+    const ip = clientIp();
     const { getSql } = await import("@/lib/db");
     const sql = await getSql();
-    const code = resetCode();
-    const expires = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
-    await sql`update password_resets set used = true where lower(email) = ${email} and used = false`;
-    await sql`
-      insert into password_resets (email, code, expires_at)
-      values (${email}, ${code}, ${expires})
+    const since = R.resetWindowStart().toISOString();
+    await sql`delete from password_reset_log where created_at < now() - interval '1 day'`;
+    const counts = await sql<{ by_email: number; by_ip: number }>`
+      select
+        count(*) filter (where email = ${email})::int as by_email,
+        count(*) filter (where ip = ${ip})::int as by_ip
+      from password_reset_log
+      where kind = 'request' and created_at > ${since}
     `;
-    return { ok: true, code };
+    const limited = R.resetRequestLimited({
+      email: counts[0]?.by_email ?? 0,
+      ip: counts[0]?.by_ip ?? 0,
+    });
+    await sql`insert into password_reset_log (kind, email, ip) values ('request', ${email}, ${ip})`;
+    if (!limited) {
+      const user = await findUserByEmail(email);
+      const staff = user ? await loadStaff(user.id) : null;
+      // The operator login has nobody above it to read a code; it recovers
+      // through its own signed-in session instead.
+      if (user && staff && !staff.isOwner) {
+        await sql`update password_resets set used = true where user_id = ${user.id} and used = false`;
+        await sql`
+          insert into password_resets (email, code, expires_at, user_id)
+          values (${email}, ${resetCode()}, ${R.resetExpiry().toISOString()}, ${user.id})
+        `;
+      }
+    }
+    return { ok: true as const, message: R.RESET_REQUEST_MESSAGE };
   });
 
+/**
+ * Finish a reset: needs the newest unused, unexpired code issued to that exact
+ * login. Wrong guesses count against the code; it burns after a few.
+ */
 export const completePasswordReset = createServerFn({ method: "POST" })
   .validator(
     z.object({
-      email: z.string().email(),
+      email: z.string().email().max(254),
       code: z.string().min(4).max(12),
       password: z.string().min(8).max(72),
     }),
   )
   .handler(async ({ data }) => {
     await ensureTables();
-    const email = data.email.trim().toLowerCase();
-    const code = data.code.trim();
+    const R = await import("@/lib/reset-codes");
+    const { clientIp } = await import("@/lib/request-ip.server");
+    const email = emailKey(data.email);
+    const ip = clientIp();
     const { getSql } = await import("@/lib/db");
     const sql = await getSql();
-    const rows = await sql<{ id: number; user_id: string | null }>`
-      select r.id, u.id as user_id
-      from password_resets r
-      join "user" u on lower(u.email) = lower(r.email)
-      where lower(r.email) = ${email}
-        and r.code = ${code}
-        and r.used = false
-        and r.expires_at > now()
-      order by r.created_at desc
+    const since = R.resetWindowStart().toISOString();
+    const fails = await sql<{ n: number }>`
+      select count(*)::int as n from password_reset_log
+      where kind = 'fail' and ip = ${ip} and created_at > ${since}
+    `;
+    if ((fails[0]?.n ?? 0) >= R.RESET_MAX_FAILS_PER_IP) {
+      throw new Error("Too many attempts. Wait 15 minutes and try again.");
+    }
+    const fail = async () => {
+      await sql`insert into password_reset_log (kind, email, ip) values ('fail', ${email}, ${ip})`;
+      return new Error(R.RESET_INVALID_MESSAGE);
+    };
+    const user = await findUserByEmail(email);
+    if (!user) throw await fail();
+    const rows = await sql<{
+      id: number;
+      code: string;
+      used: boolean;
+      attempts: number;
+      expires_at: string;
+    }>`
+      select id, code, used, attempts, to_char(expires_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as expires_at
+      from password_resets
+      where user_id = ${user.id} and used = false and expires_at > now()
+      order by created_at desc
       limit 1
     `;
     const row = rows[0];
-    if (!row?.user_id) throw new Error("That code is invalid or expired.");
-    await upsertCredentialPassword(row.user_id, data.password);
-    await sql`update password_resets set used = true where id = ${row.id}`;
-    await ensureStaff(row.user_id);
+    const verdict = R.checkResetAttempt(
+      row
+        ? { code: row.code, used: row.used, attempts: row.attempts, expiresAt: new Date(row.expires_at) }
+        : null,
+      data.code,
+    );
+    if (!row || !verdict.ok) {
+      if (row) {
+        await sql`
+          update password_resets
+          set attempts = ${verdict.attempts}, used = ${verdict.burn}
+          where id = ${row.id}
+        `;
+      }
+      throw await fail();
+    }
+    // Claim the code atomically so it can only be spent once.
+    const claimed = await sql<{ id: number }>`
+      update password_resets set used = true
+      where id = ${row.id} and used = false and user_id = ${user.id} and expires_at > now()
+      returning id
+    `;
+    if (!claimed[0]) throw await fail();
+    await sql`update password_resets set used = true where user_id = ${user.id} and used = false`;
+    await upsertCredentialPassword(user.id, data.password);
+    // Sign out everywhere: anyone holding an old session is cut off.
+    await sql`delete from "session" where "userId" = ${user.id}`;
+    await ensureStaff(user.id);
     return { ok: true };
   });
 
