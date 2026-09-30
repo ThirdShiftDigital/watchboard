@@ -254,6 +254,9 @@ function PersonDetail({
     toggles: Record<ToggleCap, boolean>;
     defaultToggles: Record<ToggleCap, boolean>;
     customizable: boolean;
+    manageable: boolean;
+    lockedReason: string | null;
+    canLinkOfficer: boolean;
   };
   mineId: string;
   allowed: Permission[];
@@ -280,37 +283,46 @@ function PersonDetail({
           {permissionLabel(person.permission)}
         </Badge>
       </div>
-      <div>
-        <p className="mb-2 text-2xs uppercase tracking-wide text-muted">Permission</p>
-        <div className="grid grid-cols-2 gap-2">
-          {allowed.map((p) => (
-            <button
-              key={p}
-              type="button"
-              className={`rounded-md border px-2 py-2 text-left text-2xs uppercase tracking-wide ${
-                person.permission === p
-                  ? "border-primary bg-primary text-primary-foreground"
-                  : "border-border text-muted"
-              }`}
-              onClick={async () => {
-                try {
-                  await setStaffPermission({
-                    data: { userId: person.userId, permission: p },
-                  });
-                  await onChanged();
-                  toast.success(`${person.name} is ${permissionLabel(p)}`);
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : "Could not update");
-                }
-              }}
-            >
-              {permissionLabel(p)}
-            </button>
-          ))}
+      {!person.manageable ? (
+        <p className="rounded-md border border-border bg-card-2 px-3 py-2 text-xs text-muted">
+          {person.userId === mineId
+            ? "This is your login. Change your password under My login; a division leader can change your role."
+            : `${person.lockedReason ?? "Outside your authority."} Role, password and delete are locked.`}
+        </p>
+      ) : null}
+      {person.manageable ? (
+        <div>
+          <p className="mb-2 text-2xs uppercase tracking-wide text-muted">Permission</p>
+          <div className="grid grid-cols-2 gap-2">
+            {allowed.map((p) => (
+              <button
+                key={p}
+                type="button"
+                className={`rounded-md border px-2 py-2 text-left text-2xs uppercase tracking-wide ${
+                  person.permission === p
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-border text-muted"
+                }`}
+                onClick={async () => {
+                  try {
+                    await setStaffPermission({
+                      data: { userId: person.userId, permission: p },
+                    });
+                    await onChanged();
+                    toast.success(`${person.name} is ${permissionLabel(p)}`);
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : "Could not update");
+                  }
+                }}
+              >
+                {permissionLabel(p)}
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+      ) : null}
       <PermissionToggles person={person} myCaps={myCaps} onChanged={onChanged} />
-      {canMoveShift && shifts.length > 0 ? (
+      {canMoveShift && person.manageable && shifts.length > 0 ? (
         <div className="space-y-2">
           <Label>Shift</Label>
           <select
@@ -342,46 +354,50 @@ function PersonDetail({
           </select>
         </div>
       ) : null}
-      <div className="space-y-2">
-        <Label>Tied officer</Label>
-        <select
-          className="flex h-11 w-full rounded-md border border-border-strong bg-background px-3 text-sm"
-          value={person.officerId ?? ""}
-          onChange={async (e) => {
-            try {
-              await setStaffPermission({
-                data: {
-                  userId: person.userId,
-                  permission: person.permission,
-                  officerId: e.target.value || null,
-                },
-              });
-              await onChanged();
-              toast.success("Officer link saved");
-            } catch (err) {
-              toast.error(err instanceof Error ? err.message : "Could not link");
-            }
+      {person.canLinkOfficer ? (
+        <div className="space-y-2">
+          <Label>Tied officer</Label>
+          <select
+            className="flex h-11 w-full rounded-md border border-border-strong bg-background px-3 text-sm"
+            value={person.officerId ?? ""}
+            onChange={async (e) => {
+              try {
+                await setStaffPermission({
+                  data: {
+                    userId: person.userId,
+                    permission: person.permission,
+                    officerId: e.target.value || null,
+                  },
+                });
+                await onChanged();
+                toast.success("Officer link saved");
+              } catch (err) {
+                toast.error(err instanceof Error ? err.message : "Could not link");
+              }
+            }}
+          >
+            <option value="">Not linked</option>
+            {officers.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : null}
+      {person.manageable ? (
+        <PasswordForm
+          title="Set password"
+          compact
+          onSave={async (password) => {
+            await setStaffPassword({
+              data: { userId: person.userId, password },
+            });
+            toast.success(`Password set for ${person.name}`);
           }}
-        >
-          <option value="">Not linked</option>
-          {officers.map((o) => (
-            <option key={o.id} value={o.id}>
-              {o.name}
-            </option>
-          ))}
-        </select>
-      </div>
-      <PasswordForm
-        title="Set password"
-        compact
-        onSave={async (password) => {
-          await setStaffPassword({
-            data: { userId: person.userId, password },
-          });
-          toast.success(`Password set for ${person.name}`);
-        }}
-      />
-      {person.userId !== mineId ? (
+        />
+      ) : null}
+      {person.manageable && person.userId !== mineId ? (
         <DeleteAccountButton
           name={person.name}
           onDelete={async () => {
@@ -407,6 +423,8 @@ function PermissionToggles({
     toggles: Record<ToggleCap, boolean>;
     defaultToggles: Record<ToggleCap, boolean>;
     customizable: boolean;
+    manageable: boolean;
+    lockedReason: string | null;
   };
   myCaps: Caps;
   onChanged: () => Promise<void>;
@@ -447,7 +465,11 @@ function PermissionToggles({
         <p className="text-sm text-muted">
           {person.permission === "admin" || person.permission === "captain"
             ? `${permissionLabel(person.permission)}s always have full access.`
-            : "You can’t change your own permissions."}
+            : person.manageable
+              ? "Agency admins always have full access."
+              : person.lockedReason === "This is your login."
+                ? "You can’t change your own permissions."
+                : "Only a division leader can change this login’s permissions."}
         </p>
       ) : (
         <ul className="divide-y divide-border rounded-md border border-border">

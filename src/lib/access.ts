@@ -183,3 +183,69 @@ export function assignablePermissions(caps: Caps): Permission[] {
   if (caps.managePlatform || caps.manageAgency) return [...PERMISSIONS];
   return ["supervisor", "dispatcher", "officer"];
 }
+
+/** Higher number = more authority. An agency admin counts as a division leader. */
+export const ROLE_RANK: Record<Permission, number> = {
+  officer: 0,
+  dispatcher: 1,
+  supervisor: 2,
+  admin: 3,
+  captain: 4,
+};
+
+/** The signed-in login acting from Accounts. `shiftId` is the shift they work / are viewing. */
+export type StaffActor = {
+  userId: string;
+  permission: Permission;
+  isOwner: boolean;
+  manageAgency: boolean;
+  managePlatform: boolean;
+  agencyId: string | null;
+  shiftId: string | null;
+};
+
+/** The login being changed. `shiftId` is their home shift (shift_id, else active_shift_id). */
+export type StaffTarget = {
+  userId: string;
+  permission: Permission;
+  isOwner: boolean;
+  agencyAdmin: boolean;
+  agencyId: string | null;
+  shiftId: string | null;
+};
+
+/**
+ * Why `actor` may not change `target` from Accounts (role, shift, officer link,
+ * password, permissions, delete), or null when allowed.
+ * - The operator can act on anyone.
+ * - Division leaders (and agency admins) can act on anyone in their agency.
+ * - Shift commanders can act only on people on their own shift who rank below
+ *   them (so not other commanders, division leaders, or agency admins).
+ * - Nobody acts on their own login here.
+ */
+export function staffManageBlock(actor: StaffActor, target: StaffTarget): string | null {
+  if (actor.userId === target.userId) return "You can’t change your own login here.";
+  if (actor.isOwner || actor.managePlatform) return null;
+  if (target.isOwner) return "Account not found.";
+  if (!actor.agencyId || target.agencyId !== actor.agencyId) {
+    return "That login belongs to another agency.";
+  }
+  if (actor.manageAgency) return null;
+  if (!actor.shiftId || target.shiftId !== actor.shiftId) {
+    return "You can only manage people on your own shift.";
+  }
+  const theirs = target.agencyAdmin ? ROLE_RANK.captain : ROLE_RANK[target.permission];
+  if (theirs >= ROLE_RANK[actor.permission]) {
+    return "Only a division leader can change a login at or above your level.";
+  }
+  return null;
+}
+
+/** Why `actor` may not give someone `role`, or null. Division leaders keep their full list. */
+export function roleAssignBlock(actor: StaffActor, role: Permission): string | null {
+  if (actor.isOwner || actor.managePlatform || actor.manageAgency) return null;
+  if (ROLE_RANK[role] >= ROLE_RANK[actor.permission]) {
+    return "Only a division leader can give that role.";
+  }
+  return null;
+}

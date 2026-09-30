@@ -11,10 +11,14 @@ import {
   defaultCapsFor,
   isPermission,
   parseCapOverrides,
+  roleAssignBlock,
+  staffManageBlock,
   type CapOverrides,
   type Caps,
   type Permission,
   type StaffAccount,
+  type StaffActor,
+  type StaffTarget,
   type ToggleCap,
 } from "@/lib/access";
 
@@ -603,6 +607,57 @@ export async function requireCap(userId: string, cap: keyof Caps) {
   return access;
 }
 
+type Access = Awaited<ReturnType<typeof accessFor>>;
+
+async function isAgencyAdminMember(userId: string, agencyId: string | null): Promise<boolean> {
+  if (!agencyId) return false;
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const rows = await sql<{ agency_admin: boolean | null }>`
+    select agency_admin from agency_members
+    where user_id = ${userId} and agency_id = ${agencyId}
+  `;
+  return Boolean(rows[0]?.agency_admin);
+}
+
+async function staffActorFor(me: Access): Promise<StaffActor> {
+  const { currentAgencyIdFor } = await import("@/lib/agencies");
+  const { activeShiftIdFor } = await import("@/lib/shifts");
+  return {
+    userId: me.userId,
+    permission: me.permission,
+    isOwner: me.isOwner,
+    manageAgency: me.caps.manageAgency,
+    managePlatform: me.caps.managePlatform,
+    agencyId: (await currentAgencyIdFor(me.userId)) || null,
+    shiftId: (await activeShiftIdFor(me.userId)) || null,
+  };
+}
+
+function staffTargetFor(target: StaffAccount, agencyAdmin: boolean): StaffTarget {
+  return {
+    userId: target.userId,
+    permission: target.permission,
+    isOwner: target.isOwner,
+    agencyAdmin,
+    agencyId: target.agencyId,
+    shiftId: target.shiftId || target.activeShiftId || null,
+  };
+}
+
+/**
+ * Throw unless `me` may change `target` from Accounts: commanders only people
+ * below them on their own shift, division leaders anyone in their agency,
+ * the operator anyone.
+ */
+async function assertCanManageStaff(me: Access, target: StaffAccount) {
+  const actor = await staffActorFor(me);
+  const agencyAdmin = await isAgencyAdminMember(target.userId, target.agencyId);
+  const block = staffManageBlock(actor, staffTargetFor(target, agencyAdmin));
+  if (block) throw new Error(block);
+  return { actor, agencyAdmin };
+}
+
 export const getSignupOpen = createServerFn({ method: "GET" }).handler(async () => {
   await ensureTables();
   return { open: true };
@@ -735,19 +790,35 @@ export const listStaff = createServerFn({ method: "POST" })
           ).map((r) => r.user_id)
         : [],
     );
+    const actor: StaffActor = {
+      userId: me.userId,
+      permission: me.permission,
+      isOwner: me.isOwner,
+      manageAgency: me.caps.manageAgency,
+      managePlatform: me.caps.managePlatform,
+      agencyId: agencyId || null,
+      shiftId: shiftId || null,
+    };
     return {
       people: people.map((p) => {
         const staff = mapStaff(p);
         const extras = { agencyAdmin: agencyAdmins.has(p.user_id) };
         const caps = capsFor(staff.permission, extras, staff.capOverrides);
         const defaults = defaultCapsFor(staff.permission, extras);
+        const manageBlock = staffManageBlock(actor, staffTargetFor(staff, extras.agencyAdmin));
+        const self = p.user_id === me.userId;
         return {
           ...staff,
           lastLoginAt: lastLoginByUser.get(p.user_id) ?? null,
           toggles: pickToggles(caps),
           defaultToggles: pickToggles(defaults),
-          customizable:
-            p.user_id !== me.userId && capsAreCustomizable(staff.permission, extras),
+          /** Role, shift, password and delete controls. */
+          manageable: manageBlock === null,
+          /** Why the controls are locked (null when manageable). */
+          lockedReason: self ? "This is your login." : manageBlock,
+          /** Your own officer link stays editable. */
+          canLinkOfficer: manageBlock === null || self,
+          customizable: manageBlock === null && capsAreCustomizable(staff.permission, extras),
         };
       }),
       resets: resets
@@ -842,16 +913,25 @@ export const setStaffPermission = createServerFn({ method: "POST" })
     if (!assignablePermissions(me.caps).includes(data.permission)) {
       throw new Error("Ask a division leader to change that role.");
     }
-    if (data.userId === me.userId && me.caps.manageAgency && data.permission !== "captain" && !me.isOwner) {
-      throw new Error("You cannot remove your own division access.");
-    }
-    if (data.userId === me.userId && data.permission !== "admin" && data.permission !== "captain" && me.permission === "admin") {
-      throw new Error("You cannot remove your own commander access.");
-    }
     const { getSql } = await import("@/lib/db");
     const sql = await getSql();
     const target = await loadStaff(data.userId);
     if (!target) throw new Error("Account not found.");
+    const self = data.userId === me.userId;
+    const elevated = me.isOwner || me.caps.managePlatform || me.caps.manageAgency;
+    if (self) {
+      // Your own row: officer link only (division leaders may still move their own shift).
+      if (data.permission !== target.permission) {
+        throw new Error("You can’t change your own role. Ask a division leader.");
+      }
+      if (data.shiftId && data.shiftId !== target.shiftId && !elevated) {
+        throw new Error("Only a division leader can move a login to another shift.");
+      }
+    } else {
+      const { actor } = await assertCanManageStaff(me, target);
+      const roleBlock = roleAssignBlock(actor, data.permission);
+      if (roleBlock) throw new Error(roleBlock);
+    }
     if (data.permission !== "admin") {
       const admins = await sql<{ n: number }>`
         select count(*)::int as n from staff_accounts where permission = 'admin'
@@ -862,8 +942,32 @@ export const setStaffPermission = createServerFn({ method: "POST" })
     }
     const officerId = data.officerId === undefined ? target.officerId : data.officerId;
     const nextShift = data.shiftId || target.shiftId;
-    if (data.shiftId && !me.caps.manageAgency && !me.isOwner) {
-      throw new Error("Only a division leader can move a login to another shift.");
+    if (data.shiftId && data.shiftId !== target.shiftId) {
+      if (!elevated) {
+        throw new Error("Only a division leader can move a login to another shift.");
+      }
+      const { loadShift } = await import("@/lib/shifts");
+      const shift = await loadShift(data.shiftId);
+      if (!shift) throw new Error("Shift not found.");
+      if (
+        !me.isOwner &&
+        !me.caps.managePlatform &&
+        shift.agencyId &&
+        shift.agencyId !== target.agencyId
+      ) {
+        throw new Error("That shift belongs to another agency.");
+      }
+    }
+    if (officerId && officerId !== target.officerId && !elevated) {
+      // Commanders can only tie logins to officers on their own shift's roster.
+      const rows = await sql<{ shift_id: string | null }>`
+        select shift_id from officers where id = ${officerId}
+      `;
+      if (!rows[0]) throw new Error("Officer not found.");
+      const theirShift = target.shiftId || target.activeShiftId;
+      if (rows[0].shift_id && rows[0].shift_id !== theirShift) {
+        throw new Error("That officer is on another shift.");
+      }
     }
     await sql`
       update staff_accounts
@@ -917,34 +1021,14 @@ export const setStaffCaps = createServerFn({ method: "POST" })
     const me = await requireCap(context.userId, "manageAccounts");
     if (data.userId === me.userId) throw new Error("You cannot change your own permissions.");
     const target = await loadStaff(data.userId);
-    if (!target || target.isOwner) throw new Error("Account not found.");
-    const { getSql } = await import("@/lib/db");
-    const sql = await getSql();
-    const adminRows = target.agencyId
-      ? await sql<{ agency_admin: boolean | null }>`
-          select agency_admin from agency_members
-          where user_id = ${target.userId} and agency_id = ${target.agencyId}
-        `
-      : [];
-    const extras = { agencyAdmin: Boolean(adminRows[0]?.agency_admin) };
+    if (!target) throw new Error("Account not found.");
+    const { agencyAdmin } = await assertCanManageStaff(me, target);
+    const extras = { agencyAdmin };
     if (!capsAreCustomizable(target.permission, extras)) {
       throw new Error("Shift commanders and division leaders always have full access.");
     }
-    if (!me.isOwner) {
-      const { currentAgencyIdFor } = await import("@/lib/agencies");
-      const agencyId = await currentAgencyIdFor(context.userId);
-      if (!agencyId || target.agencyId !== agencyId) {
-        throw new Error("That login belongs to another agency.");
-      }
-      if (!me.caps.manageAgency) {
-        const { activeShiftIdFor } = await import("@/lib/shifts");
-        const myShift = await activeShiftIdFor(context.userId);
-        const theirShift = target.shiftId || target.activeShiftId;
-        if (!myShift || theirShift !== myShift) {
-          throw new Error("You can only set permissions for people on your own shift.");
-        }
-      }
-    }
+    const { getSql } = await import("@/lib/db");
+    const sql = await getSql();
     const defaults = defaultCapsFor(target.permission, extras);
     const wanted: Record<ToggleCap, boolean> = pickToggles(
       capsFor(target.permission, extras, target.capOverrides),
@@ -987,7 +1071,13 @@ export const setStaffPassword = createServerFn({ method: "POST" })
     }),
   )
   .handler(async ({ context, data }) => {
-    await requireCap(context.userId, "manageAccounts");
+    const me = await requireCap(context.userId, "manageAccounts");
+    if (data.userId === me.userId) {
+      throw new Error("Use My login to change your own password.");
+    }
+    const target = await loadStaff(data.userId);
+    if (!target) throw new Error("Account not found.");
+    await assertCanManageStaff(me, target);
     const { getSql } = await import("@/lib/db");
     const sql = await getSql();
     const password = await hashPassword(data.password);
@@ -1019,6 +1109,7 @@ export const deleteStaffUser = createServerFn({ method: "POST" })
     const sql = await getSql();
     const target = await loadStaff(data.userId);
     if (!target) throw new Error("Account not found.");
+    await assertCanManageStaff(me, target);
     if (target.permission === "admin") {
       const admins = await sql<{ n: number }>`
         select count(*)::int as n from staff_accounts where permission = 'admin'

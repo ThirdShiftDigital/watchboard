@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
-import { accessFor, requireCap } from "@/lib/staff";
+import { requireCap } from "@/lib/staff";
 import { ensureAgencies, currentAgencyIdFor } from "@/lib/agencies";
 import { ensureSetups } from "@/lib/setups";
 import { loadShift } from "@/lib/shifts";
@@ -114,7 +114,8 @@ export const openShift = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(z.object({ shiftId: z.string().min(1) }))
   .handler(async ({ context, data }) => {
-    const access = await accessFor(context.userId);
+    // Command dashboard only: commanders stay on their own shift (see switchShift).
+    const access = await requireCap(context.userId, "manageAgency");
     const shift = await loadShift(data.shiftId);
     if (!shift) throw new Error("Shift not found.");
     if (
