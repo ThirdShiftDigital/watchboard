@@ -86,7 +86,13 @@ function AskPage() {
               Pick your name and dates. Nothing hits the calendar until a supervisor
               approves it.
             </p>
-            {q.isLoading ? (
+            {access.data &&
+            !access.data.caps.submitRequests &&
+            !access.data.caps.approveRequests ? (
+              <p className="text-sm text-muted">
+                Your account can’t submit days-off requests. Ask the shift commander.
+              </p>
+            ) : q.isLoading ? (
               <p className="text-sm text-muted">Loading roster…</p>
             ) : (
               <RequestForm

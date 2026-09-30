@@ -3,12 +3,19 @@ import { randomBytes, randomInt } from "node:crypto";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import {
+  CAP_INFO,
+  TOGGLE_CAPS,
   assignablePermissions,
+  capsAreCustomizable,
   capsFor,
+  defaultCapsFor,
   isPermission,
+  parseCapOverrides,
+  type CapOverrides,
   type Caps,
   type Permission,
   type StaffAccount,
+  type ToggleCap,
 } from "@/lib/access";
 
 type StaffRow = {
@@ -22,6 +29,7 @@ type StaffRow = {
   agency_id: string | null;
   viewing_agency_id?: string | null;
   is_owner: boolean | null;
+  cap_overrides?: string | null;
 };
 
 type ResetRow = {
@@ -45,6 +53,7 @@ function mapStaff(row: StaffRow): StaffAccount {
     viewingAgencyId: row.viewing_agency_id ?? null,
     isOwner: Boolean(row.is_owner),
     agencyAdmin: false,
+    capOverrides: parseCapOverrides(row.cap_overrides),
   };
 }
 
@@ -153,6 +162,8 @@ export async function ensureTables() {
   await sql.query(`alter table staff_accounts add column if not exists agency_id text`);
   await sql.query(`alter table staff_accounts add column if not exists viewing_agency_id text`);
   await sql.query(`alter table staff_accounts add column if not exists is_owner boolean not null default false`);
+  // Per-login permission diffs from the role defaults (JSON; see TOGGLE_CAPS).
+  await sql.query(`alter table staff_accounts add column if not exists cap_overrides text`);
   await sql.query(`
     create table if not exists agency_members (
       user_id     text not null,
@@ -447,7 +458,7 @@ async function loadStaff(userId: string): Promise<StaffAccount | null> {
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
   const rows = await sql<StaffRow>`
-    select user_id, email, name, permission, officer_id, shift_id, active_shift_id, agency_id, viewing_agency_id, is_owner
+    select user_id, email, name, permission, officer_id, shift_id, active_shift_id, agency_id, viewing_agency_id, is_owner, cap_overrides
     from staff_accounts
     where user_id = ${userId}
   `;
@@ -548,6 +559,7 @@ async function ensureStaff(userId: string): Promise<StaffAccount> {
     viewingAgencyId: null,
     isOwner: makeOwner,
     agencyAdmin: false,
+    capOverrides: {},
   };
 }
 
@@ -578,7 +590,7 @@ export async function accessFor(userId: string): Promise<StaffAccount & { caps: 
   }
   return {
     ...full,
-    caps: capsFor(full.permission, { isOwner: full.isOwner, agencyAdmin }),
+    caps: capsFor(full.permission, { isOwner: full.isOwner, agencyAdmin }, full.capOverrides),
     canClaimCommand,
   };
 }
@@ -669,7 +681,7 @@ export const listStaff = createServerFn({ method: "POST" })
     const shiftId = await activeShiftIdFor(context.userId);
     const shift = shiftId ? await loadShift(shiftId) : null;
     const people = await sql<StaffRow>`
-      select user_id, email, name, permission, officer_id, shift_id, active_shift_id, agency_id, viewing_agency_id, is_owner
+      select user_id, email, name, permission, officer_id, shift_id, active_shift_id, agency_id, viewing_agency_id, is_owner, cap_overrides
       from staff_accounts
       where coalesce(is_owner, false) = false
         and agency_id = ${agencyId}
@@ -713,11 +725,31 @@ export const listStaff = createServerFn({ method: "POST" })
     const lastLoginByUser = new Map(
       loginRows.map((r) => [r.user_id, r.last_login] as const),
     );
+    const agencyAdmins = new Set(
+      userIds.length > 0
+        ? (
+            await sql.query<{ user_id: string }>(
+              `select user_id from agency_members where agency_admin = true and user_id = any($1::text[])`,
+              [userIds],
+            )
+          ).map((r) => r.user_id)
+        : [],
+    );
     return {
-      people: people.map((p) => ({
-        ...mapStaff(p),
-        lastLoginAt: lastLoginByUser.get(p.user_id) ?? null,
-      })),
+      people: people.map((p) => {
+        const staff = mapStaff(p);
+        const extras = { agencyAdmin: agencyAdmins.has(p.user_id) };
+        const caps = capsFor(staff.permission, extras, staff.capOverrides);
+        const defaults = defaultCapsFor(staff.permission, extras);
+        return {
+          ...staff,
+          lastLoginAt: lastLoginByUser.get(p.user_id) ?? null,
+          toggles: pickToggles(caps),
+          defaultToggles: pickToggles(defaults),
+          customizable:
+            p.user_id !== me.userId && capsAreCustomizable(staff.permission, extras),
+        };
+      }),
       resets: resets
         .filter((r) => emails.includes(r.email.toLowerCase()))
         .map((r) => ({
@@ -838,7 +870,9 @@ export const setStaffPermission = createServerFn({ method: "POST" })
       set permission = ${data.permission},
           officer_id = ${officerId},
           shift_id = ${nextShift},
-          active_shift_id = ${nextShift}
+          active_shift_id = ${nextShift},
+          -- A new role starts from its own defaults.
+          cap_overrides = case when permission = ${data.permission} then cap_overrides else null end
       where user_id = ${data.userId}
     `;
     if (target.agencyId) {
@@ -851,6 +885,97 @@ export const setStaffPermission = createServerFn({ method: "POST" })
       `;
     }
     return { ok: true };
+  });
+
+function pickToggles(caps: Caps): Record<ToggleCap, boolean> {
+  const out = {} as Record<ToggleCap, boolean>;
+  for (const key of TOGGLE_CAPS) out[key] = caps[key];
+  return out;
+}
+
+/**
+ * Per-login permissions. Commanders edit supervisors / dispatch / officers on
+ * their own shift; division leaders anyone below commander in their agency;
+ * the operator anyone. Nobody can grant a capability they don't have, and
+ * commanders / division leaders themselves are not customizable.
+ */
+export const setStaffCaps = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(
+    z.object({
+      userId: z.string().min(1),
+      /** Desired effective value per capability; omitted keys follow the role default. */
+      toggles: z.object(
+        Object.fromEntries(TOGGLE_CAPS.map((k) => [k, z.boolean().optional()])) as Record<
+          ToggleCap,
+          z.ZodOptional<z.ZodBoolean>
+        >,
+      ),
+    }),
+  )
+  .handler(async ({ context, data }) => {
+    const me = await requireCap(context.userId, "manageAccounts");
+    if (data.userId === me.userId) throw new Error("You cannot change your own permissions.");
+    const target = await loadStaff(data.userId);
+    if (!target || target.isOwner) throw new Error("Account not found.");
+    const { getSql } = await import("@/lib/db");
+    const sql = await getSql();
+    const adminRows = target.agencyId
+      ? await sql<{ agency_admin: boolean | null }>`
+          select agency_admin from agency_members
+          where user_id = ${target.userId} and agency_id = ${target.agencyId}
+        `
+      : [];
+    const extras = { agencyAdmin: Boolean(adminRows[0]?.agency_admin) };
+    if (!capsAreCustomizable(target.permission, extras)) {
+      throw new Error("Shift commanders and division leaders always have full access.");
+    }
+    if (!me.isOwner) {
+      const { currentAgencyIdFor } = await import("@/lib/agencies");
+      const agencyId = await currentAgencyIdFor(context.userId);
+      if (!agencyId || target.agencyId !== agencyId) {
+        throw new Error("That login belongs to another agency.");
+      }
+      if (!me.caps.manageAgency) {
+        const { activeShiftIdFor } = await import("@/lib/shifts");
+        const myShift = await activeShiftIdFor(context.userId);
+        const theirShift = target.shiftId || target.activeShiftId;
+        if (!myShift || theirShift !== myShift) {
+          throw new Error("You can only set permissions for people on your own shift.");
+        }
+      }
+    }
+    const defaults = defaultCapsFor(target.permission, extras);
+    const wanted: Record<ToggleCap, boolean> = pickToggles(
+      capsFor(target.permission, extras, target.capOverrides),
+    );
+    const explicit = TOGGLE_CAPS.filter((k) => typeof data.toggles[k] === "boolean");
+    for (const key of explicit) wanted[key] = data.toggles[key] as boolean;
+    for (const key of explicit) {
+      if (wanted[key]) {
+        // Turning a feature on turns on what it needs (Assign zones → Zones board).
+        const req = CAP_INFO[key].requires;
+        if (req) wanted[req] = true;
+      } else {
+        // Turning a prerequisite off turns off what depends on it.
+        for (const dep of TOGGLE_CAPS) if (CAP_INFO[dep].requires === key) wanted[dep] = false;
+      }
+    }
+    for (const key of TOGGLE_CAPS) {
+      const req = CAP_INFO[key].requires;
+      if (req && !wanted[req]) wanted[key] = false;
+    }
+    const overrides: CapOverrides = {};
+    for (const key of TOGGLE_CAPS) {
+      if (wanted[key] === defaults[key]) continue;
+      if (wanted[key] && !me.caps[key]) {
+        throw new Error(`You can’t grant “${CAP_INFO[key].label}” — you don’t have it yourself.`);
+      }
+      overrides[key] = wanted[key];
+    }
+    const stored = Object.keys(overrides).length ? JSON.stringify(overrides) : null;
+    await sql`update staff_accounts set cap_overrides = ${stored} where user_id = ${target.userId}`;
+    return { toggles: pickToggles(capsFor(target.permission, extras, overrides)) };
   });
 
 export const setStaffPassword = createServerFn({ method: "POST" })

@@ -22,7 +22,7 @@ export function usePendingCount() {
   const q = useQuery({
     queryKey: ["requests"],
     queryFn: () => listRequests(),
-    enabled: Boolean(access.data?.caps.viewBoard),
+    enabled: Boolean(access.data?.caps.approveRequests),
   });
   return q.data?.requests.filter((r) => r.status === "pending").length ?? 0;
 }

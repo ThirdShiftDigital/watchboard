@@ -1,6 +1,48 @@
 export const PERMISSIONS = ["captain", "admin", "supervisor", "dispatcher", "officer"] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
+/**
+ * Capabilities a shift commander can turn on/off for an individual login
+ * (supervisor / dispatch / officer). Stored as diffs from the role defaults on
+ * staff_accounts.cap_overrides, so untouched keys keep following the role.
+ */
+export const TOGGLE_CAPS = [
+  "viewBoard",
+  "editWatch",
+  "sendList",
+  "manageRoster",
+  "approveRequests",
+  "callIn",
+  "viewCalendar",
+  "viewShiftRequests",
+  "submitRequests",
+] as const;
+export type ToggleCap = (typeof TOGGLE_CAPS)[number];
+export type CapOverrides = Partial<Record<ToggleCap, boolean>>;
+
+export const CAP_INFO: Record<ToggleCap, { label: string; hint: string; requires?: ToggleCap }> = {
+  viewBoard: { label: "Zones board", hint: "See the zone list for the shift" },
+  editWatch: { label: "Assign zones", hint: "Post and change zone assignments", requires: "viewBoard" },
+  sendList: { label: "Send the watch", hint: "Share the posted list to shift & dispatch", requires: "viewBoard" },
+  manageRoster: {
+    label: "Shift schedule",
+    hint: "Edit the roster, RDOs and minimum staffing",
+    requires: "viewBoard",
+  },
+  approveRequests: {
+    label: "Approve requests",
+    hint: "Requests page: approve, deny, restore; request for others",
+    requires: "viewBoard",
+  },
+  callIn: { label: "Call-in leave", hint: "Put someone on leave right away from Calendar", requires: "viewCalendar" },
+  viewCalendar: { label: "Shift calendar", hint: "Calendar page and the leave calendar on Officer" },
+  viewShiftRequests: {
+    label: "See who’s off",
+    hint: "Upcoming requests from others on the shift (no reasons)",
+  },
+  submitRequests: { label: "Request days off", hint: "Submit their own leave requests" },
+};
+
 export type StaffAccount = {
   userId: string;
   email: string;
@@ -13,6 +55,7 @@ export type StaffAccount = {
   viewingAgencyId?: string | null;
   isOwner: boolean;
   agencyAdmin: boolean;
+  capOverrides: CapOverrides;
 };
 
 export function isPermission(value: string): value is Permission {
@@ -55,32 +98,85 @@ export type Caps = {
   editWatch: boolean;
   manageRoster: boolean;
   approveRequests: boolean;
+  callIn: boolean;
+  viewShiftRequests: boolean;
+  submitRequests: boolean;
   sendList: boolean;
   manageAccounts: boolean;
   manageAgency: boolean;
   managePlatform: boolean;
 };
 
-export function capsFor(
-  permission: Permission,
-  extras?: { isOwner?: boolean; agencyAdmin?: boolean },
-): Caps {
+type CapExtras = { isOwner?: boolean; agencyAdmin?: boolean };
+
+/** Commanders, division leaders and the operator always have every capability. */
+export function capsAreCustomizable(permission: Permission, extras?: CapExtras): boolean {
+  if (extras?.isOwner || extras?.agencyAdmin) return false;
+  return permission === "supervisor" || permission === "dispatcher" || permission === "officer";
+}
+
+/** Role defaults — what every login had before per-officer permissions. */
+export function defaultCapsFor(permission: Permission, extras?: CapExtras): Caps {
   const owner = Boolean(extras?.isOwner);
   const captain = owner || permission === "captain" || Boolean(extras?.agencyAdmin);
   const admin = captain || permission === "admin";
   const supervisor = admin || permission === "supervisor";
   const dispatcher = supervisor || permission === "dispatcher";
+  // Dispatch runs the board; the shift's leave calendar is not theirs to see.
+  const dispatchOnly = permission === "dispatcher" && !supervisor;
   return {
     viewBoard: dispatcher,
-    viewCalendar: true,
+    viewCalendar: !dispatchOnly,
     editWatch: supervisor,
     manageRoster: supervisor,
     approveRequests: supervisor,
+    callIn: supervisor,
+    viewShiftRequests: !dispatchOnly,
+    submitRequests: true,
     sendList: dispatcher,
     manageAccounts: admin,
     manageAgency: captain,
     managePlatform: owner,
   };
+}
+
+/** Turn off anything whose prerequisite is off (e.g. Assign zones without the board). */
+export function normalizeToggles(caps: Caps): Caps {
+  const next = { ...caps };
+  for (const key of TOGGLE_CAPS) {
+    const req = CAP_INFO[key].requires;
+    if (req && !next[req]) next[key] = false;
+  }
+  return next;
+}
+
+export function capsFor(permission: Permission, extras?: CapExtras, overrides?: CapOverrides): Caps {
+  const base = defaultCapsFor(permission, extras);
+  if (!overrides || !capsAreCustomizable(permission, extras)) return base;
+  const merged = { ...base };
+  for (const key of TOGGLE_CAPS) {
+    const v = overrides[key];
+    if (typeof v === "boolean") merged[key] = v;
+  }
+  return normalizeToggles(merged);
+}
+
+export function parseCapOverrides(raw: unknown): CapOverrides {
+  let value: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: CapOverrides = {};
+  for (const key of TOGGLE_CAPS) {
+    const v = (value as Record<string, unknown>)[key];
+    if (typeof v === "boolean") out[key] = v;
+  }
+  return out;
 }
 
 export function assignablePermissions(caps: Caps): Permission[] {
