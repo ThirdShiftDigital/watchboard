@@ -215,6 +215,11 @@ export const getWatch = createServerFn({ method: "POST" })
       rows = buildRows(officers, weekday, date, requests, calendar.events, assignments);
     }
     const workingCount = rows.filter((r) => r.status === "working").length;
+    if (!access.caps.viewCalendar) {
+      // No shift-calendar access (dispatch by default): keep who is on/off,
+      // drop the calendar event list and titles.
+      rows = rows.map((r) => (r.eventTitle ? { ...r, eventTitle: undefined } : r));
+    }
     return {
       date,
       weekday,
@@ -225,7 +230,7 @@ export const getWatch = createServerFn({ method: "POST" })
       leaveCount: rows.filter((r) => r.status === "leave").length,
       calendarOffCount: rows.filter((r) => r.status === "calendar").length,
       assignedCount: rows.filter((r) => r.status === "working" && r.zone).length,
-      calendar,
+      calendar: access.caps.viewCalendar ? calendar : { ...calendar, events: [] },
       effectiveDate: shift.effectiveDate,
       generated: true,
       zoneOrder: shift.zoneOrder,
@@ -361,10 +366,20 @@ export const deleteAssignment = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
+/** Other officers' reasons/notes are private to approvers. */
+function hideOthersReasons(
+  requests: TimeOffRequest[],
+  access: { caps: { approveRequests: boolean }; officerId: string | null },
+): TimeOffRequest[] {
+  if (access.caps.approveRequests) return requests;
+  return requests.map((r) => (r.officerId === access.officerId ? r : { ...r, reason: "" }));
+}
+
 export const listRequests = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
-    await requireCap(context.userId, "viewBoard");
+    // Full list (with reasons) is the Requests page — approvers only.
+    await requireCap(context.userId, "approveRequests");
     const shift = await currentShiftFor(context.userId);
     const [requests, officers] = await Promise.all([
       loadRequests(shift.id),
@@ -384,13 +399,22 @@ export const getOfficerPortal = createServerFn({ method: "POST" })
     const today = todayISO();
     const weekStart = startOfWeek(today);
     const officerId = access.officerId ?? data.officerId;
-    const calendar = await fetchCalendar(
+    const fullCalendar = await fetchCalendar(
       officers,
       weekStart,
       addDays(weekStart, 27),
       shift,
       access.caps.editWatch,
     );
+    // Without shift-calendar access, only events about the viewer's own officer.
+    const calendar = access.caps.viewCalendar
+      ? fullCalendar
+      : {
+          ...fullCalendar,
+          events: officerId
+            ? fullCalendar.events.filter((e) => e.matchedOfficerIds.includes(officerId))
+            : [],
+        };
     if (!officerId) {
       return {
         officers,
@@ -433,6 +457,55 @@ export const getOfficerPortal = createServerFn({ method: "POST" })
     };
   });
 
+/**
+ * Upcoming (today onward, Central) pending + approved requests from everyone on
+ * the viewer's shift, read-only, so officers know who is already off. Name,
+ * dates, type and status only — never another officer's reason/notes.
+ */
+export const listShiftLeave = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    const access = await requireCap(context.userId, "viewShiftRequests");
+    const shift = await currentShiftFor(context.userId);
+    const today = todayISO();
+    const officers = await loadOfficers(shift.id);
+    const { getSql } = await import("@/lib/db");
+    const sql = await getSql();
+    const rows = await sql<{
+      id: number;
+      officer_id: string;
+      start_date: string;
+      end_date: string;
+      kind: string;
+      status: string;
+    }>`
+      select r.id, r.officer_id, r.start_date, r.end_date, r.kind, r.status
+      from time_off_requests r
+      join officers o on o.id = r.officer_id
+      where o.shift_id = ${shift.id}
+        and r.status in ('pending', 'approved')
+        and r.end_date >= ${today}
+      order by r.start_date asc, r.end_date asc, r.id asc
+      limit 300
+    `;
+    const nameById = new Map(officers.map((o) => [o.id, o.name]));
+    return {
+      today,
+      requests: rows
+        .filter((r) => nameById.has(r.officer_id))
+        .map((r) => ({
+          id: Number(r.id),
+          officerId: r.officer_id,
+          officerName: nameById.get(r.officer_id) ?? "",
+          startDate: r.start_date,
+          endDate: r.end_date,
+          kind: r.kind as RequestKind,
+          status: r.status as "pending" | "approved",
+          mine: Boolean(access.officerId) && r.officer_id === access.officerId,
+        })),
+    };
+  });
+
 export const createRequest = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(
@@ -446,6 +519,9 @@ export const createRequest = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const access = await accessFor(context.userId);
+    if (!access.caps.approveRequests && !access.caps.submitRequests) {
+      throw new Error("Your account can’t submit days-off requests. Ask the shift commander.");
+    }
     if (!access.caps.approveRequests && access.officerId && data.officerId !== access.officerId) {
       throw new Error("You can only request days off for your own name.");
     }
@@ -651,7 +727,7 @@ export const callInLeave = createServerFn({ method: "POST" })
     }),
   )
   .handler(async ({ data, context }) => {
-    await requireCap(context.userId, "approveRequests");
+    await requireCap(context.userId, "callIn");
     if (data.endDate < data.startDate) {
       throw new Error("End date must be on or after the start date.");
     }
@@ -876,13 +952,18 @@ export const getSchedule = createServerFn({ method: "POST" })
       loadRequests(shift.id),
     ]);
     const access = await accessFor(context.userId);
-    const calendar = await fetchCalendar(officers, weekStart, weekEnd, shift, access.caps.editWatch);
+    const fullCalendar = await fetchCalendar(officers, weekStart, weekEnd, shift, access.caps.editWatch);
+    // Schedule editors need calendar leave for coverage; others need calendar access.
+    const calendar =
+      access.caps.viewCalendar || access.caps.manageRoster
+        ? fullCalendar
+        : { ...fullCalendar, events: [] };
     const { loadAgency } = await import("@/lib/agencies");
     const agency = shift.agencyId ? await loadAgency(shift.agencyId) : await loadAgency("home");
     return {
       weekStart,
       officers,
-      requests,
+      requests: hideOthersReasons(requests, access),
       calendar,
       effectiveDate: shift.effectiveDate,
       minWorking: shift.minWorking,
@@ -922,7 +1003,10 @@ export const getCalendarMonth = createServerFn({ method: "POST" })
     ]);
     const requests = access.caps.approveRequests
       ? allRequests
-      : allRequests.filter((r) => r.status === "approved");
+      : hideOthersReasons(
+          allRequests.filter((r) => r.status === "approved"),
+          access,
+        );
     const calendar = await fetchCalendar(officers, data.from, data.to, shift, access.caps.editWatch);
     return { officers, requests, calendar };
   });

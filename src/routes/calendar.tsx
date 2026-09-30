@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { Navigate, createFileRoute } from "@tanstack/react-router";
 import { ChevronLeft, ChevronRight, Link2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -41,6 +41,10 @@ function CalendarPage() {
   const access = useMyAccess();
   const canEditFeed = Boolean(access.data?.caps.editWatch);
   const canRemoveLeave = Boolean(access.data?.caps.approveRequests);
+  const canCallIn = Boolean(access.data?.caps.callIn);
+  const canRequest = Boolean(access.data?.caps.submitRequests || access.data?.caps.approveRequests);
+  // Dispatch (and anyone the commander turned it off for) has no shift calendar.
+  const canView = Boolean(access.data?.caps.viewCalendar);
   const queryClient = useQueryClient();
   const [requesting, setRequesting] = useState(false);
   const [callIn, setCallIn] = useState(false);
@@ -58,13 +62,13 @@ function CalendarPage() {
   const q = useQuery({
     queryKey: ["calendar", monthStart],
     queryFn: () => getCalendarMonth({ data: { from: monthStart, to: last } }),
-    enabled: ready,
+    enabled: ready && canView,
   });
 
   const feedQuery = useQuery({
     queryKey: ["calendar-feed"],
     queryFn: () => getCalendarFeed(),
-    enabled: ready,
+    enabled: ready && canView,
   });
 
   useRefetchWhenConnectorReady(q.data?.calendar.kind === "pending", () => q.refetch());
@@ -127,6 +131,16 @@ function CalendarPage() {
     );
   }
   if (!user) return <RedirectToSignIn />;
+  if (access.isPending) {
+    return (
+      <div className="flex min-h-dvh items-center justify-center bg-background text-sm text-muted">
+        Checking access…
+      </div>
+    );
+  }
+  if (access.data && !canView) {
+    return <Navigate to={access.data.caps.viewBoard ? "/" : "/me"} />;
+  }
 
   return (
     <AppShell
@@ -304,14 +318,16 @@ function CalendarPage() {
         )}
 
         <div className="mt-4 grid grid-cols-1 gap-2">
-          {canRemoveLeave ? (
+          {canCallIn ? (
             <Button className="w-full" onClick={() => setCallIn(true)}>
               Call in sick
             </Button>
           ) : null}
-          <Button variant={canRemoveLeave ? "secondary" : undefined} className="w-full" onClick={() => setRequesting(true)}>
-            Request this day off
-          </Button>
+          {canRequest ? (
+            <Button variant={canCallIn ? "secondary" : undefined} className="w-full" onClick={() => setRequesting(true)}>
+              Request this day off
+            </Button>
+          ) : null}
         </div>
 
         <h3 className="mt-6 text-2xs uppercase tracking-wide-plus text-muted">

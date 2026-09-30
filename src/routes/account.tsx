@@ -12,7 +12,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/cn";
 import { formatStamp } from "@/lib/dates";
-import { PERMISSIONS, assignablePermissions, permissionHint, permissionLabel, type Permission } from "@/lib/access";
+import {
+  CAP_INFO,
+  PERMISSIONS,
+  TOGGLE_CAPS,
+  assignablePermissions,
+  permissionHint,
+  permissionLabel,
+  type Caps,
+  type Permission,
+  type ToggleCap,
+} from "@/lib/access";
 import { useMyAccess, usePendingCount } from "@/lib/hooks";
 import {
   changeMyPassword,
@@ -21,6 +31,7 @@ import {
   deleteMyAccount,
   deleteStaffUser,
   listStaff,
+  setStaffCaps,
   setStaffPassword,
   setStaffPermission,
 } from "@/lib/staff";
@@ -186,6 +197,7 @@ function AccountPage() {
                   officers={staffQuery.data?.officers ?? []}
                   shifts={staffQuery.data?.shifts ?? []}
                   canMoveShift={Boolean(mine.caps.manageAgency || mine.isOwner)}
+                  myCaps={mine.caps}
                   onChanged={async () => {
                     await queryClient.invalidateQueries({ queryKey: ["staff"] });
                     await queryClient.invalidateQueries({ queryKey: ["my-access"] });
@@ -228,6 +240,7 @@ function PersonDetail({
   officers,
   shifts,
   canMoveShift,
+  myCaps,
   onChanged,
 }: {
   person: {
@@ -238,12 +251,16 @@ function PersonDetail({
     officerId: string | null;
     shiftId: string | null;
     lastLoginAt?: string | null;
+    toggles: Record<ToggleCap, boolean>;
+    defaultToggles: Record<ToggleCap, boolean>;
+    customizable: boolean;
   };
   mineId: string;
   allowed: Permission[];
   officers: { id: string; name: string }[];
   shifts: { id: string; name: string }[];
   canMoveShift: boolean;
+  myCaps: Caps;
   onChanged: () => Promise<void>;
 }) {
   return (
@@ -292,6 +309,7 @@ function PersonDetail({
           ))}
         </div>
       </div>
+      <PermissionToggles person={person} myCaps={myCaps} onChanged={onChanged} />
       {canMoveShift && shifts.length > 0 ? (
         <div className="space-y-2">
           <Label>Shift</Label>
@@ -373,6 +391,105 @@ function PersonDetail({
           }}
         />
       ) : null}
+    </div>
+  );
+}
+
+function PermissionToggles({
+  person,
+  myCaps,
+  onChanged,
+}: {
+  person: {
+    userId: string;
+    name: string;
+    permission: Permission;
+    toggles: Record<ToggleCap, boolean>;
+    defaultToggles: Record<ToggleCap, boolean>;
+    customizable: boolean;
+  };
+  myCaps: Caps;
+  onChanged: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState<ToggleCap | "reset" | null>(null);
+  const custom = TOGGLE_CAPS.some((k) => person.toggles[k] !== person.defaultToggles[k]);
+
+  async function save(toggles: Partial<Record<ToggleCap, boolean>>, key: ToggleCap | "reset") {
+    setBusy(key);
+    try {
+      await setStaffCaps({ data: { userId: person.userId, toggles } });
+      await onChanged();
+      if (key === "reset") toast.success(`${person.name} is back to ${permissionLabel(person.permission)} defaults`);
+      else toast.success(`${CAP_INFO[key].label} ${toggles[key] ? "on" : "off"} for ${person.name}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not update permissions");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <p className="text-2xs uppercase tracking-wide text-muted">Permissions</p>
+        {person.customizable && custom ? (
+          <button
+            type="button"
+            disabled={busy !== null}
+            className="text-2xs uppercase tracking-wide text-primary disabled:opacity-40"
+            onClick={() => void save({ ...person.defaultToggles }, "reset")}
+          >
+            Reset to role defaults
+          </button>
+        ) : null}
+      </div>
+      {!person.customizable ? (
+        <p className="text-sm text-muted">
+          {person.permission === "admin" || person.permission === "captain"
+            ? `${permissionLabel(person.permission)}s always have full access.`
+            : "You can’t change your own permissions."}
+        </p>
+      ) : (
+        <ul className="divide-y divide-border rounded-md border border-border">
+          {TOGGLE_CAPS.map((key) => {
+            const info = CAP_INFO[key];
+            const on = person.toggles[key];
+            const changed = on !== person.defaultToggles[key];
+            const blocked = Boolean(info.requires && !person.toggles[info.requires]);
+            const cannotGrant = !on && !myCaps[key];
+            return (
+              <li key={key} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                <span className="min-w-0">
+                  <span className="block text-sm">
+                    {info.label}
+                    {changed ? (
+                      <span className="ml-2 text-2xs uppercase tracking-wide text-primary">Custom</span>
+                    ) : null}
+                  </span>
+                  <span className="block text-2xs text-muted">
+                    {info.hint}
+                    {blocked && info.requires ? ` · needs ${CAP_INFO[info.requires].label}` : ""}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={on}
+                  aria-label={info.label}
+                  disabled={busy !== null || cannotGrant}
+                  className={cn(
+                    "w-14 shrink-0 rounded-md border px-2 py-1.5 text-2xs uppercase tracking-wide disabled:opacity-40",
+                    on ? "border-primary bg-primary text-primary-foreground" : "border-border text-muted",
+                  )}
+                  onClick={() => void save({ [key]: !on }, key)}
+                >
+                  {busy === key ? "…" : on ? "On" : "Off"}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }

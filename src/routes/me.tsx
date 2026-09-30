@@ -13,7 +13,7 @@ import { RedirectToSignIn, UserButton } from "@/lib/auth/gates";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { cn } from "@/lib/cn";
 import { addDays, eventDayRange, eventOverlapsRange, formatLong, formatShort, formatStamp, startOfWeek, todayISO } from "@/lib/dates";
-import { cancelMyRequest, createRequest, getOfficerPortal } from "@/lib/fns";
+import { cancelMyRequest, createRequest, getOfficerPortal, listShiftLeave } from "@/lib/fns";
 import { useMyAccess } from "@/lib/hooks";
 import { useOfficerSession } from "@/lib/officer-session";
 import { linkMyOfficer } from "@/lib/staff";
@@ -40,6 +40,14 @@ function OfficerPage() {
     queryKey: ["officer-portal", activeId],
     queryFn: () => getOfficerPortal({ data: { officerId: activeId ?? undefined } }),
     enabled: ready && Boolean(user) && !access.isPending,
+  });
+  const canViewCalendar = Boolean(access.data?.caps.viewCalendar);
+  const canRequest = Boolean(access.data?.caps.submitRequests || access.data?.caps.approveRequests);
+  const canSeeShiftLeave = Boolean(access.data?.caps.viewShiftRequests);
+  const shiftLeaveQuery = useQuery({
+    queryKey: ["officer-portal", "shift-leave"],
+    queryFn: () => listShiftLeave(),
+    enabled: ready && Boolean(user) && canSeeShiftLeave,
   });
 
   const officers = portalQuery.data?.officers ?? [];
@@ -116,12 +124,14 @@ function OfficerPage() {
           </h1>
           <p className="mt-1 text-2xs uppercase tracking-wide text-muted">Days off · calendar</p>
         </div>
-        <Button variant="ghost" size="sm" asChild>
-          <Link to="/calendar">
-            <CalendarDays className="size-4" />
-            Calendar
-          </Link>
-        </Button>
+        {canViewCalendar ? (
+          <Button variant="ghost" size="sm" asChild>
+            <Link to="/calendar">
+              <CalendarDays className="size-4" />
+              Calendar
+            </Link>
+          </Button>
+        ) : null}
         {access.data?.caps.viewBoard ? (
           <Button variant="ghost" size="sm" asChild>
             <Link to={supervisorTo} search={supervisorSearch}>
@@ -213,6 +223,7 @@ function OfficerPage() {
               </div>
             </section>
 
+            {canViewCalendar ? (
             <section className="space-y-2">
               <div className="flex items-center justify-between">
                 <p className="text-2xs uppercase tracking-wide text-muted">Leave calendar</p>
@@ -242,19 +253,22 @@ function OfficerPage() {
                 </ul>
               )}
             </section>
+            ) : null}
 
             <section className="space-y-2">
               <div className="flex items-center justify-between">
                 <p className="text-2xs uppercase tracking-wide text-muted">My requests</p>
-                <button
-                  type="button"
-                  onClick={() => setRequesting((v) => !v)}
-                  className="text-2xs uppercase tracking-wide text-primary"
-                >
-                  {requesting ? "Close" : "Request days off"}
-                </button>
+                {canRequest ? (
+                  <button
+                    type="button"
+                    onClick={() => setRequesting((v) => !v)}
+                    className="text-2xs uppercase tracking-wide text-primary"
+                  >
+                    {requesting ? "Close" : "Request days off"}
+                  </button>
+                ) : null}
               </div>
-              {requesting ? (
+              {requesting && canRequest ? (
                 <div className="rounded-lg border border-border bg-card px-4 py-4">
                   <RequestForm
                     embedded
@@ -300,6 +314,12 @@ function OfficerPage() {
             </section>
           </div>
         )}
+        {canSeeShiftLeave ? (
+          <ShiftLeaveList
+            loading={shiftLeaveQuery.isLoading}
+            requests={shiftLeaveQuery.data?.requests ?? []}
+          />
+        ) : null}
       </main>
 
       {picking ? (
@@ -318,6 +338,53 @@ function OfficerPage() {
         />
       ) : null}
     </div>
+  );
+}
+
+function ShiftLeaveList({
+  loading,
+  requests,
+}: {
+  loading: boolean;
+  requests: {
+    id: number;
+    officerName: string;
+    startDate: string;
+    endDate: string;
+    kind: Parameters<typeof kindLabel>[0];
+    status: "pending" | "approved";
+    mine: boolean;
+  }[];
+}) {
+  return (
+    <section className="mt-5 space-y-2">
+      <p className="text-2xs uppercase tracking-wide text-muted">Who’s off · upcoming</p>
+      {loading ? (
+        <p className="text-sm text-muted">Loading…</p>
+      ) : requests.length === 0 ? (
+        <p className="text-sm text-muted">No upcoming requests on this shift.</p>
+      ) : (
+        <ul className="divide-y divide-border rounded-lg border border-border bg-card">
+          {requests.map((r) => (
+            <li key={r.id} className="flex items-center justify-between gap-3 px-4 py-3">
+              <span className="min-w-0">
+                <span className="block truncate text-sm">
+                  {r.officerName}
+                  {r.mine ? <span className="ml-1.5 text-xs text-muted">(you)</span> : null}
+                </span>
+                <span className="text-xs text-muted">
+                  {formatShort(r.startDate)}
+                  {r.endDate !== r.startDate ? ` – ${formatShort(r.endDate)}` : ""}
+                  <span className="mx-1.5 text-subtle">·</span>
+                  {kindLabel(r.kind)}
+                </span>
+              </span>
+              <Badge tone={statusTone(r.status)}>{statusLabel(r.status)}</Badge>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
