@@ -45,6 +45,8 @@ describe("owner sees all agencies + an Unassigned list (spec 3.1)", () => {
     assert.ok(!ids.includes(board.ownerId), "owner never listed");
     assert.ok(res.people.every((p) => p.unassigned));
     assert.ok((res.unassignedCount ?? 0) >= 2);
+    const shiftView = await staff.listStaffFor("cmd2", "shift");
+    assert.ok(!shiftView.people.some((p) => p.userId === "jdenson"), "not under This shift");
     const homeShifts = res.placement.find((a) => a.id === "home").shifts.map((s) => s.id);
     assert.ok(homeShifts.includes("second-shift"));
   });
@@ -144,6 +146,8 @@ describe("add user attaches an existing login (spec 3.2) + case-insensitive emai
     assert.equal(row.shift_id, "second-shift");
     assert.equal(row.permission, "officer");
     assert.equal((await staff.accessFor("selfsign")).unassigned, false);
+    const shiftView = await staff.listStaffFor("cmd2", "shift");
+    assert.ok(shiftView.people.some((p) => p.userId === "selfsign"), "now under This shift");
   });
 
   it("a commander can't take a login from another agency", async () => {
@@ -270,5 +274,42 @@ describe("createStaffUser validates the shift belongs to the agency (spec 3.3)",
       select user_id from staff_accounts where shift_id = 'default' or active_shift_id = 'default'
     `;
     assert.deepEqual(rows, []);
+  });
+});
+
+describe("owner Add user resolves agency + shift together (acceptance 13-14)", () => {
+  const add = (email) =>
+    staff.createStaffUserFor(board.ownerId, {
+      name: "Owner Added",
+      email,
+      password: "temporary-pass",
+      permission: "officer",
+    });
+
+  it("viewing an agency with no shifts and no active shift: rejected, nothing written", async () => {
+    await app.sql`insert into agencies (id, name, short_name) values ('empty', 'Empty SO', 'ESO')`;
+    await app.sql`
+      update staff_accounts set viewing_agency_id = 'empty', active_shift_id = null
+      where user_id = ${board.ownerId}
+    `;
+    await assert.rejects(() => add("owner-add-1@empty.gov"), /Pick a shift/);
+    assert.equal((await app.sql`select id from "user" where email = 'owner-add-1@empty.gov'`).length, 0);
+    const stale = await app.sql`select count(*)::int as n from staff_accounts where shift_id = 'default'`;
+    assert.equal(stale[0].n, 0);
+  });
+
+  it("viewing agency B with active shift in agency A: never B + A's shift", async () => {
+    await app.sql`
+      update staff_accounts set viewing_agency_id = 'metro', active_shift_id = 'second-shift'
+      where user_id = ${board.ownerId}
+    `;
+    const res = await add("owner-add-2@metro.gov");
+    const row = await staffRow(res.userId);
+    assert.equal(row.agency_id, "metro");
+    assert.equal(row.shift_id, "metro-days", "B's resolved shift");
+    await app.sql`
+      update staff_accounts set viewing_agency_id = null, active_shift_id = null
+      where user_id = ${board.ownerId}
+    `;
   });
 });
