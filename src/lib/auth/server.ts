@@ -30,6 +30,7 @@
  * a verified id via `@/lib/auth/middleware`.
  */
 import { betterAuth } from "better-auth";
+import { APIError } from "better-auth/api";
 import { bearer, genericOAuth } from "better-auth/plugins";
 import { tanstackStartCookies } from "better-auth/tanstack-start";
 import { getCookie } from "@tanstack/react-start/server";
@@ -215,7 +216,27 @@ export const auth = betterAuth({
   session: { cookieCache: { enabled: true, maxAge: 300 } },
 
   // Local email/password — toggled only via `./email-password` (not a plugin).
-  ...(emailAndPasswordEnabled ? { emailAndPassword: { enabled: true } } : {}),
+  // WatchBoard: public sign-up is OFF. Logins are created by admins
+  // (createStaffUser) or with an invite code (signUpWithInvite), both of which
+  // insert directly; a failed sign-in can never turn into a new account.
+  ...(emailAndPasswordEnabled ? { emailAndPassword: { enabled: true, disableSignUp: true } } : {}),
+
+  // Backstop for every Better Auth path that could mint a user (email sign-up,
+  // OAuth callbacks): refuse. The one exception is the Grok gate identity hook
+  // on /get-session, which only runs for a cryptographically verified gate
+  // token (see gate-session.server.ts).
+  databaseHooks: {
+    user: {
+      create: {
+        before: async (_user, ctx) => {
+          if (ctx?.path === "/get-session") return;
+          throw new APIError("FORBIDDEN", {
+            message: "Sign-up is closed. Ask your shift commander to create your login.",
+          });
+        },
+      },
+    },
+  },
 
   // `__Host-` prefixed cookies: the browser REFUSES any same-named cookie that
   // carries a `Domain` attribute, so a sibling `*.grok.me` app cannot "toss" a

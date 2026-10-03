@@ -4,17 +4,22 @@ import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import {
   CAP_INFO,
+  NO_CAPS,
   TOGGLE_CAPS,
+  UNASSIGNED_MESSAGE,
   assignablePermissions,
   capsAreCustomizable,
   capsFor,
   defaultCapsFor,
   isPermission,
+  isUnassignedLogin,
+  officerLinkBlock,
   parseCapOverrides,
   roleAssignBlock,
   staffManageBlock,
   type CapOverrides,
   type Caps,
+  type LoginAssignment,
   type Permission,
   type StaffAccount,
   type StaffActor,
@@ -583,7 +588,39 @@ async function ensureStaff(userId: string): Promise<StaffAccount> {
   };
 }
 
-export async function accessFor(userId: string): Promise<StaffAccount & { caps: Caps; canClaimCommand: boolean }> {
+/**
+ * Where a login sits: its agency must exist and (below division leader) its
+ * home shift must be one of that agency's shifts. No fallbacks — a login with
+ * no agency is not quietly treated as agency `home` or its oldest shift.
+ */
+export async function loginAssignment(staff: StaffAccount): Promise<LoginAssignment> {
+  const base = {
+    isOwner: staff.isOwner,
+    permission: staff.permission,
+    agencyAdmin: staff.agencyAdmin,
+    agencyId: staff.agencyId || null,
+  };
+  if (staff.isOwner || !staff.agencyId) {
+    return { ...base, agencyExists: false, shiftInAgency: false };
+  }
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const home = staff.shiftId || staff.activeShiftId || "";
+  const rows = await sql<{ agency_ok: boolean; shift_ok: boolean }>`
+    select
+      exists (select 1 from agencies where id = ${staff.agencyId}) as agency_ok,
+      exists (select 1 from shifts where id = ${home} and agency_id = ${staff.agencyId}) as shift_ok
+  `;
+  return {
+    ...base,
+    agencyExists: Boolean(rows[0]?.agency_ok),
+    shiftInAgency: Boolean(rows[0]?.shift_ok),
+  };
+}
+
+export async function accessFor(
+  userId: string,
+): Promise<StaffAccount & { caps: Caps; canClaimCommand: boolean; unassigned: boolean }> {
   const staff = await ensureStaff(userId);
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
@@ -596,31 +633,65 @@ export async function accessFor(userId: string): Promise<StaffAccount & { caps: 
     agencyAdmin = Boolean(rows[0]?.agency_admin);
   }
   const full = { ...staff, agencyAdmin };
+  // Fail closed: a login nobody has placed on an agency/shift gets nothing.
+  if (isUnassignedLogin(await loginAssignment(full))) {
+    return {
+      ...staff,
+      agencyAdmin: false,
+      caps: { ...NO_CAPS },
+      canClaimCommand: false,
+      unassigned: true,
+    };
+  }
   let canClaimCommand = false;
-  if (full.permission !== "admin" && !full.isOwner && !agencyAdmin) {
-    const admins = full.agencyId
-      ? await sql<{ n: number }>`
-          select count(*)::int as n from staff_accounts
-          where permission = 'admin' and agency_id = ${full.agencyId}
-        `
-      : await sql<{ n: number }>`
-          select count(*)::int as n from staff_accounts where permission = 'admin'
-        `;
+  if (full.permission !== "admin" && !full.isOwner && !agencyAdmin && full.agencyId) {
+    const admins = await sql<{ n: number }>`
+      select count(*)::int as n from staff_accounts
+      where permission = 'admin' and agency_id = ${full.agencyId}
+    `;
     canClaimCommand = (admins[0]?.n ?? 0) === 0;
   }
   return {
     ...full,
     caps: capsFor(full.permission, { isOwner: full.isOwner, agencyAdmin }, full.capOverrides),
     canClaimCommand,
+    unassigned: false,
   };
 }
 
 export async function requireCap(userId: string, cap: keyof Caps) {
   const access = await accessFor(userId);
   if (!access.caps[cap]) {
-    throw new Error("You do not have permission for that.");
+    throw new Error(access.unassigned ? UNASSIGNED_MESSAGE : "You do not have permission for that.");
   }
   return access;
+}
+
+/** An officer's shift and that shift's agency, or null when the officer doesn't exist. */
+export async function officerPlacement(
+  officerId: string,
+): Promise<{ shiftId: string | null; agencyId: string | null } | null> {
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const rows = await sql<{ shift_id: string | null; agency_id: string | null }>`
+    select o.shift_id, s.agency_id
+    from officers o
+    left join shifts s on s.id = o.shift_id
+    where o.id = ${officerId}
+  `;
+  return rows[0] ? { shiftId: rows[0].shift_id, agencyId: rows[0].agency_id } : null;
+}
+
+/** True when another login is already tied to this roster officer. */
+async function officerLinkedElsewhere(officerId: string, userId: string): Promise<boolean> {
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const rows = await sql<{ user_id: string }>`
+    select user_id from staff_accounts
+    where officer_id = ${officerId} and user_id <> ${userId}
+    limit 1
+  `;
+  return Boolean(rows[0]);
 }
 
 type Access = Awaited<ReturnType<typeof accessFor>>;
@@ -674,10 +745,70 @@ async function assertCanManageStaff(me: Access, target: StaffAccount) {
   return { actor, agencyAdmin };
 }
 
+/** Public sign-up is closed; new logins need an invite code or an admin. */
 export const getSignupOpen = createServerFn({ method: "GET" }).handler(async () => {
   await ensureTables();
-  return { open: true };
+  return { open: false };
 });
+
+/**
+ * The only self-service way to create a login: needs a valid, unused invite
+ * code (the invite itself is spent later on /onboard). The new login has no
+ * agency, so it lands unassigned until the invite is redeemed or an admin
+ * places it. Better Auth's own sign-up endpoint is disabled (auth/server.ts).
+ * A brand-new, empty database may create its first login without a code; that
+ * login becomes the operator (see ensureStaff).
+ */
+const inviteSignUpInput = z.object({
+  code: z.string().trim().max(12).optional(),
+  name: z.string().trim().min(1).max(80),
+  email: z.string().trim().toLowerCase().email().max(254),
+  password: z.string().min(8).max(72),
+});
+
+export async function createInvitedLogin(data: z.infer<typeof inviteSignUpInput>) {
+  await ensureTables();
+  const { ensureAgencies } = await import("@/lib/agencies");
+  await ensureAgencies();
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const users = await sql<{ n: number }>`select count(*)::int as n from "user"`;
+  const bootstrap = (users[0]?.n ?? 0) === 0;
+  if (!bootstrap) {
+    const code = (data.code ?? "").toUpperCase();
+    const invite = code
+      ? await sql<{ id: number }>`
+          select id from agency_invites
+          where code = ${code} and used = false and expires_at > now()
+          limit 1
+        `
+      : [];
+    if (!invite[0]) {
+      throw new Error("Sign-up needs a valid invite code. Ask your shift commander to create your login.");
+    }
+  }
+  const email = emailKey(data.email);
+  if (await findUserByEmail(email)) {
+    throw new Error("That email already has a login. Sign in, or ask your shift commander to reset the password.");
+  }
+  const userId = newId();
+  const now = new Date().toISOString();
+  const password = await hashPassword(data.password);
+  await sql`
+    insert into "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+    values (${userId}, ${data.name}, ${email}, false, ${now}, ${now})
+  `;
+  await sql`
+    insert into "account" (id, "accountId", "providerId", "userId", password, "createdAt", "updatedAt")
+    values (${newId()}, ${userId}, 'credential', ${userId}, ${password}, ${now}, ${now})
+  `;
+  await ensureStaff(userId);
+  return { ok: true as const, userId };
+}
+
+export const signUpWithInvite = createServerFn({ method: "POST" })
+  .validator(inviteSignUpInput)
+  .handler(async ({ data }) => createInvitedLogin(data));
 
 export const getMyAccess = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
@@ -687,20 +818,17 @@ export const claimShiftCommand = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     const me = await accessFor(context.userId);
+    if (me.unassigned || !me.agencyId) throw new Error(UNASSIGNED_MESSAGE);
     if (me.permission === "admin" || me.caps.manageAccounts || me.isOwner || me.agencyAdmin) {
       return me;
     }
     const { getSql } = await import("@/lib/db");
     const sql = await getSql();
-    // Bootstrap only when this agency (or the whole board) has no commander yet.
-    const admins = me.agencyId
-      ? await sql<{ n: number }>`
-          select count(*)::int as n from staff_accounts
-          where permission = 'admin' and agency_id = ${me.agencyId}
-        `
-      : await sql<{ n: number }>`
-          select count(*)::int as n from staff_accounts where permission = 'admin'
-        `;
+    // Bootstrap only when this agency has no commander yet.
+    const admins = await sql<{ n: number }>`
+      select count(*)::int as n from staff_accounts
+      where permission = 'admin' and agency_id = ${me.agencyId}
+    `;
     if ((admins[0]?.n ?? 0) > 0) {
       throw new Error(
         "Ask an existing shift commander or agency admin to promote you on Accounts.",
@@ -718,27 +846,45 @@ export const claimShiftCommand = createServerFn({ method: "POST" })
     };
   });
 
+/** Tie the caller's own login to a roster officer (see officerLinkBlock). */
+export async function linkOfficerToSelf(userId: string, officerId: string) {
+  const me = await accessFor(userId);
+  if (me.unassigned) throw new Error(UNASSIGNED_MESSAGE);
+  if (me.officerId && me.officerId !== officerId && !me.caps.manageAccounts) {
+    throw new Error("Your login is already tied to an officer. Ask the shift commander to change it.");
+  }
+  const { currentAgencyIdFor } = await import("@/lib/agencies");
+  const { activeShiftIdFor } = await import("@/lib/shifts");
+  const agencyId = me.isOwner ? (await currentAgencyIdFor(userId)) || null : me.agencyId;
+  const block = officerLinkBlock({
+    officer: await officerPlacement(officerId),
+    agencyId,
+    shiftId: (await activeShiftIdFor(userId)) || null,
+    agencyWide: me.caps.manageAgency || me.caps.managePlatform,
+    linkedToOther: await officerLinkedElsewhere(officerId, userId),
+  });
+  if (block) throw new Error(block);
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  await sql`
+    update staff_accounts
+    set officer_id = ${officerId}
+    where user_id = ${userId}
+  `;
+  if (me.agencyId) {
+    await sql`
+      insert into agency_members (user_id, agency_id, permission, officer_id, agency_admin)
+      values (${userId}, ${me.agencyId}, ${me.permission}, ${officerId}, ${me.permission === "captain"})
+      on conflict (user_id, agency_id) do update set officer_id = excluded.officer_id
+    `;
+  }
+  return { officerId };
+}
+
 export const linkMyOfficer = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(z.object({ officerId: z.string().min(1) }))
-  .handler(async ({ context, data }) => {
-    const me = await accessFor(context.userId);
-    if (me.officerId && me.officerId !== data.officerId && !me.caps.manageAccounts) {
-      throw new Error("Your login is already tied to an officer. Ask the shift commander to change it.");
-    }
-    const { getSql } = await import("@/lib/db");
-    const sql = await getSql();
-    const officers = await sql<{ id: string }>`select id from officers where id = ${data.officerId}`;
-    if (!officers[0]) throw new Error("Officer not found.");
-    await sql`
-      update staff_accounts
-      set officer_id = ${data.officerId}
-      where user_id = ${context.userId}
-    `;
-    return { officerId: data.officerId };
-  });
-
-
+  .handler(async ({ context, data }) => linkOfficerToSelf(context.userId, data.officerId));
 
 export const listStaff = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
@@ -963,8 +1109,8 @@ export const setStaffPermission = createServerFn({ method: "POST" })
         throw new Error("Keep at least one admin on the shift.");
       }
     }
-    const officerId = data.officerId === undefined ? target.officerId : data.officerId;
     const nextShift = data.shiftId || target.shiftId;
+    let nextAgency = target.agencyId;
     if (data.shiftId && data.shiftId !== target.shiftId) {
       if (!elevated) {
         throw new Error("Only a division leader can move a login to another shift.");
@@ -972,25 +1118,29 @@ export const setStaffPermission = createServerFn({ method: "POST" })
       const { loadShift } = await import("@/lib/shifts");
       const shift = await loadShift(data.shiftId);
       if (!shift) throw new Error("Shift not found.");
-      if (
-        !me.isOwner &&
-        !me.caps.managePlatform &&
-        shift.agencyId &&
-        shift.agencyId !== target.agencyId
-      ) {
-        throw new Error("That shift belongs to another agency.");
+      if (!shift.agencyId) throw new Error("That shift is not on an agency.");
+      if (shift.agencyId !== target.agencyId) {
+        // Only the operator moves a login between agencies (or places an
+        // unassigned one); agency, shift and membership then move together.
+        if (!me.isOwner && !me.caps.managePlatform) {
+          throw new Error("That shift belongs to another agency.");
+        }
+        nextAgency = shift.agencyId;
       }
     }
-    if (officerId && officerId !== target.officerId && !elevated) {
-      // Commanders can only tie logins to officers on their own shift's roster.
-      const rows = await sql<{ shift_id: string | null }>`
-        select shift_id from officers where id = ${officerId}
-      `;
-      if (!rows[0]) throw new Error("Officer not found.");
-      const theirShift = target.shiftId || target.activeShiftId;
-      if (rows[0].shift_id && rows[0].shift_id !== theirShift) {
-        throw new Error("That officer is on another shift.");
-      }
+    const agencyChanged = nextAgency !== target.agencyId;
+    // A new agency drops the old roster link unless a new one is chosen.
+    const officerId =
+      data.officerId === undefined ? (agencyChanged ? null : target.officerId) : data.officerId;
+    if (officerId && officerId !== target.officerId) {
+      const block = officerLinkBlock({
+        officer: await officerPlacement(officerId),
+        agencyId: nextAgency,
+        shiftId: nextShift || target.activeShiftId,
+        agencyWide: elevated,
+        linkedToOther: await officerLinkedElsewhere(officerId, data.userId),
+      });
+      if (block) throw new Error(block);
     }
     await sql`
       update staff_accounts
@@ -998,11 +1148,22 @@ export const setStaffPermission = createServerFn({ method: "POST" })
           officer_id = ${officerId},
           shift_id = ${nextShift},
           active_shift_id = ${nextShift},
+          agency_id = ${nextAgency},
           -- A new role starts from its own defaults.
           cap_overrides = case when permission = ${data.permission} then cap_overrides else null end
       where user_id = ${data.userId}
     `;
-    if (target.agencyId) {
+    if (agencyChanged && nextAgency) {
+      await sql`delete from agency_members where user_id = ${data.userId} and agency_id <> ${nextAgency}`;
+      await sql`
+        insert into agency_members (user_id, agency_id, permission, officer_id, agency_admin)
+        values (${data.userId}, ${nextAgency}, ${data.permission}, ${officerId}, ${data.permission === "captain"})
+        on conflict (user_id, agency_id) do update
+          set permission = excluded.permission,
+              officer_id = excluded.officer_id,
+              agency_admin = excluded.agency_admin
+      `;
+    } else if (target.agencyId) {
       await sql`
         update agency_members
         set permission = ${data.permission},
