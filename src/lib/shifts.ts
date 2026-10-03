@@ -155,7 +155,9 @@ export async function ensureShifts() {
   }
 }
 
+/** Shifts for one agency, or every shift when `agencyId` is omitted. "" (no agency) lists none. */
 export async function listShiftRows(agencyId?: string): Promise<Shift[]> {
+  if (agencyId === "") return [];
   await ensureShifts();
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
@@ -202,15 +204,18 @@ export async function activeShiftIdFor(userId: string): Promise<string> {
     from staff_accounts where user_id = ${userId}
   `;
   const staff = rows[0];
-  const agencyId = staff?.is_owner ? staff?.viewing_agency_id : staff?.agency_id;
+  if (!staff) return "";
+  const isOwner = Boolean(staff.is_owner);
+  const agencyId = isOwner ? staff.viewing_agency_id : staff.agency_id;
+  // A non-operator login with no agency is unassigned: no shift at all.
+  if (!isOwner && !agencyId) return "";
   // Division leaders / owners may browse shifts via active_shift_id.
   // Everyone else must stay on their home shift_id so a stale active pointer
   // (or "oldest shift" fallback) cannot show them another watch's board.
-  const canBrowseShifts =
-    Boolean(staff?.is_owner) || staff?.permission === "captain";
+  const canBrowseShifts = isOwner || staff.permission === "captain";
   const preferred = canBrowseShifts
-    ? staff?.active_shift_id || staff?.shift_id
-    : staff?.shift_id || staff?.active_shift_id;
+    ? staff.active_shift_id || staff.shift_id
+    : staff.shift_id || staff.active_shift_id;
   if (preferred) {
     const exists = agencyId
       ? await sql<{ id: string }>`
@@ -222,7 +227,7 @@ export async function activeShiftIdFor(userId: string): Promise<string> {
       // Heal stale active_shift_id for non-browsers so Accounts + schedule agree.
       if (
         !canBrowseShifts &&
-        staff?.shift_id &&
+        staff.shift_id &&
         staff.shift_id === id &&
         staff.active_shift_id &&
         staff.active_shift_id !== id
@@ -236,16 +241,25 @@ export async function activeShiftIdFor(userId: string): Promise<string> {
       return id;
     }
   }
+  // Home shift missing or in another agency: unassigned until an admin fixes it.
+  if (!canBrowseShifts) return "";
   if (agencyId) {
     const first = await sql<{ id: string }>`
       select id from shifts where agency_id = ${agencyId} order by created_at asc limit 1
     `;
     return first[0]?.id ?? "";
   }
+  // The operator with no agency picked yet: any shift.
+  if (!isOwner) return "";
   const fallback = await sql<{ id: string }>`select id from shifts order by created_at asc limit 1`;
-  return fallback[0]?.id ?? DEFAULT_SHIFT_ID;
+  return fallback[0]?.id ?? "";
 }
 
+/**
+ * The shift the user is working. With none (unassigned login, or the operator
+ * on an agency with no shifts) this is an empty placeholder whose `id` is "" —
+ * never a real shift — so roster/request loaders return nothing.
+ */
 export async function currentShiftFor(userId: string): Promise<Shift> {
   const id = await activeShiftIdFor(userId);
   if (id) {
@@ -253,7 +267,7 @@ export async function currentShiftFor(userId: string): Promise<Shift> {
     if (loaded) return loaded;
   }
   return {
-    id: DEFAULT_SHIFT_ID,
+    id: "",
     name: "No shift yet",
     startTime: "06:00",
     endTime: "18:00",
@@ -262,6 +276,13 @@ export async function currentShiftFor(userId: string): Promise<Shift> {
     zoneOrder: [...STARTER_ZONES],
     calendarFeedUrl: "",
   };
+}
+
+/** currentShiftFor for writes: throws instead of returning the empty placeholder. */
+export async function requireCurrentShift(userId: string): Promise<Shift> {
+  const shift = await currentShiftFor(userId);
+  if (!shift.id) throw new Error("Pick a shift under WatchBoard first.");
+  return shift;
 }
 
 function slugShift(name: string, taken: Set<string>): string {
@@ -289,6 +310,7 @@ export const listShifts = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     const access = await accessFor(context.userId);
+    if (access.unassigned) return { shifts: [], currentId: "" };
     const shifts = await listShiftRows(await currentAgencyIdFor(context.userId));
     const currentId = await activeShiftIdFor(context.userId);
     const home = access.shiftId || access.activeShiftId || currentId;
@@ -491,7 +513,7 @@ export const updateShiftSettings = createServerFn({ method: "POST" })
     const access = await accessFor(context.userId);
     const shift = data.shiftId
       ? await loadShift(data.shiftId)
-      : await currentShiftFor(context.userId);
+      : await requireCurrentShift(context.userId);
     if (!shift) throw new Error("Shift not found.");
     const currentId = await activeShiftIdFor(context.userId);
     const sameAgency = Boolean(shift.agencyId && access.agencyId && shift.agencyId === access.agencyId);

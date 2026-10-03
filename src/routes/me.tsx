@@ -39,7 +39,7 @@ function OfficerPage() {
   const portalQuery = useQuery({
     queryKey: ["officer-portal", activeId],
     queryFn: () => getOfficerPortal({ data: { officerId: activeId ?? undefined } }),
-    enabled: ready && Boolean(user) && !access.isPending,
+    enabled: ready && Boolean(user) && !access.isPending && !access.data?.unassigned,
   });
   const canViewCalendar = Boolean(access.data?.caps.viewCalendar);
   const canRequest = Boolean(access.data?.caps.submitRequests || access.data?.caps.approveRequests);
@@ -113,6 +113,7 @@ function OfficerPage() {
     );
   }
   if (!user) return <RedirectToSignIn />;
+  const unassigned = Boolean(access.data?.unassigned);
 
   return (
     <div className="flex min-h-dvh flex-col bg-background text-foreground">
@@ -145,7 +146,20 @@ function OfficerPage() {
 
       <main className="mx-auto w-full max-w-lg flex-1 px-4 py-5 pb-16">
         <InstallAppButton className="mb-4 w-full" />
-        {!officer ? (
+        {unassigned ? (
+          <div className="rounded-lg border border-border bg-card px-5 py-8 text-center">
+            <p className="font-display text-2xl font-semibold uppercase tracking-wide">
+              Awaiting assignment
+            </p>
+            <p className="mt-2 text-sm text-muted">
+              Your account is awaiting assignment by an administrator. Once you are placed on
+              an agency and shift you will see your schedule and can request days off.
+            </p>
+            <p className="mt-3 text-xs text-muted">
+              Signed in as {access.data?.email}. Ask your shift commander to add you.
+            </p>
+          </div>
+        ) : !officer ? (
           <div className="rounded-lg border border-border bg-card px-5 py-8 text-center">
             <p className="font-display text-2xl font-semibold uppercase tracking-wide">
               Who are you?
@@ -322,7 +336,7 @@ function OfficerPage() {
         ) : null}
       </main>
 
-      {picking ? (
+      {picking && !unassigned ? (
         <PickerSheet
           title="Deputy"
           options={officers.map((o) => ({

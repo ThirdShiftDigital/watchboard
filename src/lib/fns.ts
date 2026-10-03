@@ -14,9 +14,10 @@ import type {
 } from "@/lib/types";
 import { buildRows, deriveLastName, leaveEventDescription, leaveEventSummary, statusForOfficer } from "@/lib/watch-logic";
 import { applySeniority, normalizeZoneOrder, sortRoster } from "@/lib/types";
+import { requestForBlock } from "@/lib/access";
 import { authMiddleware } from "@/lib/auth/middleware";
-import { requireCap, accessFor } from "@/lib/staff";
-import { currentShiftFor, ensureShifts, loadShift } from "@/lib/shifts";
+import { requireCap, accessFor, officerPlacement } from "@/lib/staff";
+import { activeShiftIdFor, currentShiftFor, ensureShifts, loadShift, requireCurrentShift } from "@/lib/shifts";
 import {
   connectShiftGoogle,
   disconnectShiftGoogle,
@@ -107,6 +108,7 @@ function mapRequest(row: RequestRow): TimeOffRequest {
 }
 
 async function loadOfficers(shiftId: string) {
+  if (!shiftId) return [];
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
   const rows = await sql<OfficerRow>`
@@ -119,6 +121,7 @@ async function loadOfficers(shiftId: string) {
 }
 
 async function loadRequests(shiftId: string) {
+  if (!shiftId) return [];
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
   const rows = await sql<RequestRow>`
@@ -137,6 +140,7 @@ async function loadRequests(shiftId: string) {
 }
 
 async function loadAssignments(date: string, shiftId: string) {
+  if (!shiftId) return [];
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
   const rows = await sql<AssignmentRow>`
@@ -278,7 +282,7 @@ export const rebuildWatch = createServerFn({ method: "POST" })
   .validator(dateInput)
   .handler(async ({ data, context }) => {
     await requireCap(context.userId, "editWatch");
-    const shift = await currentShiftFor(context.userId);
+    const shift = await requireCurrentShift(context.userId);
     const { getSql } = await import("@/lib/db");
     const sql = await getSql();
     await sql`
@@ -303,7 +307,7 @@ export const setZoneOrder = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     await requireCap(context.userId, "editWatch");
     const order = normalizeZoneOrder(data.order);
-    const shift = await currentShiftFor(context.userId);
+    const shift = await requireCurrentShift(context.userId);
     const { getSql } = await import("@/lib/db");
     const sql = await getSql();
     await sql`
@@ -323,7 +327,7 @@ export const upsertAssignment = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     await requireCap(context.userId, "editWatch");
-    const shift = await currentShiftFor(context.userId);
+    const shift = await requireCurrentShift(context.userId);
     // Duty gate from DB only — Save must not wait on Google/ICS.
     const [officers, requests] = await Promise.all([
       loadOfficers(shift.id),
@@ -394,11 +398,28 @@ export const getOfficerPortal = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     await ensureShifts();
     const access = await accessFor(context.userId);
-    const shift = await currentShiftFor(context.userId);
-    const officers = await loadOfficers(shift.id);
     const today = todayISO();
     const weekStart = startOfWeek(today);
-    const officerId = access.officerId ?? data.officerId;
+    if (access.unassigned) {
+      // Awaiting assignment: no roster, no calendar, nothing to request against.
+      return {
+        officers: [],
+        officer: null,
+        requests: [],
+        today,
+        weekStart,
+        todayRow: null,
+        linked: false,
+        unassigned: true,
+        calendar: { kind: "not_connected", events: [] } as CalendarState,
+      };
+    }
+    const shift = await currentShiftFor(context.userId);
+    const officers = await loadOfficers(shift.id);
+    // Only approvers may look at another officer's page; everyone else sees the
+    // roster name their login is tied to (linkMyOfficer checks the shift).
+    const officerId =
+      access.officerId ?? (access.caps.approveRequests ? (data.officerId ?? null) : null);
     const fullCalendar = await fetchCalendar(
       officers,
       weekStart,
@@ -424,6 +445,7 @@ export const getOfficerPortal = createServerFn({ method: "POST" })
         weekStart,
         todayRow: null,
         linked: false,
+        unassigned: false,
         calendar,
       };
     }
@@ -453,6 +475,7 @@ export const getOfficerPortal = createServerFn({ method: "POST" })
       weekStart,
       todayRow,
       linked: Boolean(access.officerId),
+      unassigned: false,
       calendar,
     };
   });
@@ -519,12 +542,15 @@ export const createRequest = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const access = await accessFor(context.userId);
-    if (!access.caps.approveRequests && !access.caps.submitRequests) {
-      throw new Error("Your account can’t submit days-off requests. Ask the shift commander.");
-    }
-    if (!access.caps.approveRequests && access.officerId && data.officerId !== access.officerId) {
-      throw new Error("You can only request days off for your own name.");
-    }
+    const block = requestForBlock({
+      caps: access.caps,
+      linkedOfficerId: access.officerId,
+      officerId: data.officerId,
+      officer: await officerPlacement(data.officerId),
+      actorAgencyId: access.agencyId,
+      actorShiftId: (await activeShiftIdFor(context.userId)) || null,
+    });
+    if (block) throw new Error(block);
     if (data.endDate < data.startDate) {
       throw new Error("End date must be on or after the start date.");
     }
@@ -731,7 +757,7 @@ export const callInLeave = createServerFn({ method: "POST" })
     if (data.endDate < data.startDate) {
       throw new Error("End date must be on or after the start date.");
     }
-    const shift = await currentShiftFor(context.userId);
+    const shift = await requireCurrentShift(context.userId);
     const officers = await loadOfficers(shift.id);
     const officer = officers.find((o) => o.id === data.officerId);
     if (!officer) throw new Error("Officer not found.");
@@ -778,7 +804,7 @@ export const toggleRdo = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     await requireCap(context.userId, "manageRoster");
-    const shift = await currentShiftFor(context.userId);
+    const shift = await requireCurrentShift(context.userId);
     const officers = await loadOfficers(shift.id);
     const officer = officers.find((o) => o.id === data.officerId);
     if (!officer) throw new Error("Officer not found.");
@@ -803,7 +829,7 @@ export const setRdoDays = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     await requireCap(context.userId, "manageRoster");
-    const shift = await currentShiftFor(context.userId);
+    const shift = await requireCurrentShift(context.userId);
     const officers = await loadOfficers(shift.id);
     if (!officers.some((o) => o.id === data.officerId)) {
       throw new Error("Officer not found.");
@@ -858,7 +884,7 @@ export const createOfficer = createServerFn({ method: "POST" })
   .validator(officerInput)
   .handler(async ({ data, context }) => {
     await requireCap(context.userId, "manageRoster");
-    const shift = await currentShiftFor(context.userId);
+    const shift = await requireCurrentShift(context.userId);
     const officers = await loadOfficers(shift.id);
     const unit = data.unit.trim();
     if (officers.some((o) => o.unit === unit)) {
@@ -895,7 +921,7 @@ export const updateOfficer = createServerFn({ method: "POST" })
   .validator(officerInput.extend({ id: z.string().min(1) }))
   .handler(async ({ data, context }) => {
     await requireCap(context.userId, "manageRoster");
-    const shift = await currentShiftFor(context.userId);
+    const shift = await requireCurrentShift(context.userId);
     const officers = await loadOfficers(shift.id);
     const current = officers.find((o) => o.id === data.id);
     if (!current) throw new Error("Officer not found.");
@@ -959,7 +985,7 @@ export const getSchedule = createServerFn({ method: "POST" })
         ? fullCalendar
         : { ...fullCalendar, events: [] };
     const { loadAgency } = await import("@/lib/agencies");
-    const agency = shift.agencyId ? await loadAgency(shift.agencyId) : await loadAgency("home");
+    const agency = shift.agencyId ? await loadAgency(shift.agencyId) : null;
     return {
       weekStart,
       officers,
@@ -977,7 +1003,7 @@ export const setMinWorking = createServerFn({ method: "POST" })
   .validator(z.object({ min: z.number().int().min(1).max(30) }))
   .handler(async ({ data, context }) => {
     await requireCap(context.userId, "manageRoster");
-    const shift = await currentShiftFor(context.userId);
+    const shift = await requireCurrentShift(context.userId);
     const { getSql } = await import("@/lib/db");
     const sql = await getSql();
     await sql`
@@ -1041,7 +1067,7 @@ export const setCalendarFeed = createServerFn({ method: "POST" })
   .validator(z.object({ url: z.string().max(2000) }))
   .handler(async ({ data, context }) => {
     await requireCap(context.userId, "editWatch");
-    const shift = await currentShiftFor(context.userId);
+    const shift = await requireCurrentShift(context.userId);
     const raw = data.url.trim();
     const url = raw ? normalizeFeedUrl(raw) : "";
     if (url) {
@@ -1066,7 +1092,7 @@ export const connectGoogleCalendar = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     await requireCap(context.userId, "editWatch");
-    const shift = await currentShiftFor(context.userId);
+    const shift = await requireCurrentShift(context.userId);
     return connectShiftGoogle(shift.id, context.userId);
   });
 
@@ -1075,7 +1101,7 @@ export const setGoogleCalendarId = createServerFn({ method: "POST" })
   .validator(z.object({ calendarId: z.string().max(2000) }))
   .handler(async ({ data, context }) => {
     await requireCap(context.userId, "editWatch");
-    const shift = await currentShiftFor(context.userId);
+    const shift = await requireCurrentShift(context.userId);
     return selectShiftGoogleCalendar(shift.id, data.calendarId);
   });
 
@@ -1083,7 +1109,7 @@ export const disconnectGoogleCalendar = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     await requireCap(context.userId, "editWatch");
-    const shift = await currentShiftFor(context.userId);
+    const shift = await requireCurrentShift(context.userId);
     await disconnectShiftGoogle(shift.id);
     return { connected: false };
   });

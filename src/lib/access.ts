@@ -140,6 +140,51 @@ export function defaultCapsFor(permission: Permission, extras?: CapExtras): Caps
   };
 }
 
+/** Every capability off: what a login with no agency / shift assignment gets. */
+export const NO_CAPS: Caps = {
+  viewBoard: false,
+  viewCalendar: false,
+  editWatch: false,
+  manageRoster: false,
+  approveRequests: false,
+  callIn: false,
+  viewShiftRequests: false,
+  submitRequests: false,
+  sendList: false,
+  manageAccounts: false,
+  manageAgency: false,
+  managePlatform: false,
+};
+
+/** Shown wherever an unassigned login is turned away. */
+export const UNASSIGNED_MESSAGE = "Your account is awaiting assignment by an administrator.";
+
+/** Where a login sits, as loaded from staff_accounts + agencies + shifts. */
+export type LoginAssignment = {
+  isOwner: boolean;
+  permission: Permission;
+  /** Division leader / agency admin: agency-wide, no home shift. */
+  agencyAdmin: boolean;
+  agencyId: string | null;
+  /** The agency row exists. */
+  agencyExists: boolean;
+  /** Their home shift (shift_id, else active_shift_id) exists and belongs to agencyId. */
+  shiftInAgency: boolean;
+};
+
+/**
+ * True when a login has not been placed by an administrator: no agency, an
+ * agency that no longer exists, or (below division leader) no valid shift in
+ * that agency. Such logins get NO_CAPS and see nothing agency- or shift-scoped.
+ * The operator (owner) is never unassigned.
+ */
+export function isUnassignedLogin(a: LoginAssignment): boolean {
+  if (a.isOwner) return false;
+  if (!a.agencyId || !a.agencyExists) return true;
+  if (a.permission === "captain" || a.agencyAdmin) return false;
+  return !a.shiftInAgency;
+}
+
 /** Turn off anything whose prerequisite is off (e.g. Assign zones without the board). */
 export function normalizeToggles(caps: Caps): Caps {
   const next = { ...caps };
@@ -246,6 +291,72 @@ export function roleAssignBlock(actor: StaffActor, role: Permission): string | n
   if (actor.isOwner || actor.managePlatform || actor.manageAgency) return null;
   if (ROLE_RANK[role] >= ROLE_RANK[actor.permission]) {
     return "Only a division leader can give that role.";
+  }
+  return null;
+}
+
+/**
+ * Why a login may not be tied to a roster officer, or null when allowed.
+ * - The login must be on an agency, and the officer's shift must be in it.
+ * - Unless the caller works agency-wide (division leader / operator), the
+ *   officer must be on the login's own shift.
+ * - One officer, one login.
+ */
+export function officerLinkBlock(input: {
+  /** The officer's shift and that shift's agency; null when the officer doesn't exist. */
+  officer: { shiftId: string | null; agencyId: string | null } | null;
+  /** The login being linked: its agency and home shift. */
+  agencyId: string | null;
+  shiftId: string | null;
+  agencyWide: boolean;
+  /** Another login already has this officer. */
+  linkedToOther: boolean;
+}): string | null {
+  if (!input.officer) return "Officer not found.";
+  if (!input.agencyId) return UNASSIGNED_MESSAGE;
+  if (!input.officer.agencyId || input.officer.agencyId !== input.agencyId) {
+    return "That officer belongs to another agency.";
+  }
+  if (!input.agencyWide && (!input.shiftId || input.officer.shiftId !== input.shiftId)) {
+    return "That officer is on another shift.";
+  }
+  if (input.linkedToOther) return "That officer is already linked to another login.";
+  return null;
+}
+
+/**
+ * Why `officerId` may not get a new days-off request from this login, or null.
+ * Officers request only for their own linked roster name; approvers may also
+ * request for others on their shift (division leaders: their agency; the
+ * operator: anyone).
+ */
+export function requestForBlock(input: {
+  caps: Caps;
+  /** The requester's own linked roster officer. */
+  linkedOfficerId: string | null;
+  officerId: string;
+  /** The officer's shift and that shift's agency; null when the officer doesn't exist. */
+  officer: { shiftId: string | null; agencyId: string | null } | null;
+  actorAgencyId: string | null;
+  actorShiftId: string | null;
+}): string | null {
+  const { caps } = input;
+  if (!caps.approveRequests && !caps.submitRequests) {
+    return "Your account can’t submit days-off requests. Ask the shift commander.";
+  }
+  if (!input.officer) return "Officer not found.";
+  if (input.linkedOfficerId && input.officerId === input.linkedOfficerId) return null;
+  if (!caps.approveRequests) {
+    return input.linkedOfficerId
+      ? "You can only request days off for your own name."
+      : "Link your roster name before requesting days off.";
+  }
+  if (caps.managePlatform) return null;
+  if (!input.actorAgencyId || input.officer.agencyId !== input.actorAgencyId) {
+    return "That officer belongs to another agency.";
+  }
+  if (!caps.manageAgency && (!input.actorShiftId || input.officer.shiftId !== input.actorShiftId)) {
+    return "That officer is on another shift.";
   }
   return null;
 }

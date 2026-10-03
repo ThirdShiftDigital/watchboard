@@ -126,6 +126,7 @@ export async function loadAgency(id: string): Promise<Agency | null> {
   return rows[0] ? mapAgency(rows[0]) : null;
 }
 
+/** The agency the user is working in; "" when a non-operator login has none. */
 export async function currentAgencyIdFor(userId: string): Promise<string> {
   await ensureAgencies();
   const { getSql } = await import("@/lib/db");
@@ -155,9 +156,12 @@ export async function currentAgencyIdFor(userId: string): Promise<string> {
     const first = await sql<{ id: string }>`select id from agencies order by name limit 1`;
     return first[0]?.id ?? DEFAULT_AGENCY_ID;
   }
-  const id = staff?.agency_id || DEFAULT_AGENCY_ID;
+  // Everyone else sees only the agency they were placed on. No agency (e.g. a
+  // self-signup) means none — never a quiet fallback to `home`.
+  const id = staff?.agency_id;
+  if (!id) return "";
   const exists = await sql<{ id: string }>`select id from agencies where id = ${id}`;
-  return exists[0]?.id ?? DEFAULT_AGENCY_ID;
+  return exists[0]?.id ?? "";
 }
 
 export async function setViewingAgency(userId: string, agencyId: string) {

@@ -9,7 +9,7 @@ import { Label } from "@/components/ui/label";
 import { authClient, authEnabled } from "@/lib/auth/client";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { useMyAccess } from "@/lib/hooks";
-import { claimShiftCommand, attachMyLogin } from "@/lib/staff";
+import { claimShiftCommand, attachMyLogin, signUpWithInvite } from "@/lib/staff";
 
 type LoginSearch = { switch?: boolean; code?: string; next?: string };
 
@@ -39,7 +39,7 @@ function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
-  const formMode = mode;
+  const formMode = code ? mode : "in";
   const canUseBoard = Boolean(access.data?.caps.viewBoard);
 
   // Keep the sign-in form up front. Only leave after session/access resolve.
@@ -59,28 +59,21 @@ function Login() {
         await attachMyLogin({
           data: { email: emailValue, password, name: name.trim() || undefined },
         });
-      } else if (formMode === "up") {
-        const { error } = await authClient.signUp.email({
-          name: name.trim() || emailValue,
-          email: emailValue,
-          password,
+      } else if (formMode === "up" && code) {
+        // Invite sign-up: the server checks the code and creates the login
+        // (Better Auth's public sign-up is disabled), then we sign in.
+        await signUpWithInvite({
+          data: { code, name: name.trim() || emailValue, email: emailValue, password },
         });
-        if (error) throw new Error(error.message ?? "Could not create account");
+        const { error } = await authClient.signIn.email({ email: emailValue, password });
+        if (error) throw new Error(error.message ?? "Could not sign in");
       } else {
+        // A failed sign-in is only ever an error — never a new account.
         const { error } = await authClient.signIn.email({
           email: emailValue,
           password,
         });
-        if (error) {
-          const created = await authClient.signUp.email({
-            name: name.trim() || emailValue,
-            email: emailValue,
-            password,
-          });
-          if (created.error) {
-            throw new Error(error.message ?? "Could not sign in");
-          }
-        }
+        if (error) throw new Error(error.message || "Wrong email or password.");
       }
       await authClient.getSession();
       if (code) {
@@ -202,15 +195,21 @@ function Login() {
                 Forgot password?
               </Link>
             ) : null}
-            <button
-              type="button"
-              className="w-full pt-1 text-center text-xs text-muted"
-              onClick={() => setMode((m) => (m === "in" ? "up" : "in"))}
-            >
-              {formMode === "in"
-                ? "Need an account? Create an officer login"
-                : "Already have an account? Sign in"}
-            </button>
+            {code && !user ? (
+              <button
+                type="button"
+                className="w-full pt-1 text-center text-xs text-muted"
+                onClick={() => setMode((m) => (m === "in" ? "up" : "in"))}
+              >
+                {formMode === "in"
+                  ? "New here? Create your login with this invite"
+                  : "Already have an account? Sign in"}
+              </button>
+            ) : !user ? (
+              <p className="pt-1 text-center text-xs text-muted">
+                No login yet? Ask your shift commander to create one.
+              </p>
+            ) : null}
           </form>
         )}
 
