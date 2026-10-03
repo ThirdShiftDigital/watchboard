@@ -46,6 +46,7 @@ export interface Sql {
  */
 const globalRef = globalThis as typeof globalThis & {
   __pgSqlPromise__?: Promise<Sql>;
+  __pgPool__?: import("pg").Pool;
   __pgliteInstance__?: Promise<import("@electric-sql/pglite").PGlite>;
   __pgliteMigrateChain__?: Promise<void>;
 };
@@ -103,6 +104,7 @@ function createNeonSql(): Promise<Sql> {
       connectionTimeoutMillis: 15_000,
       allowExitOnIdle: true,
     });
+    globalRef.__pgPool__ = pool;
     return toSql(async <T>(text: string, params: unknown[]) => {
       const res = await pool.query(text, params);
       return res.rows as T[];
@@ -201,6 +203,39 @@ export function getSql(): Promise<Sql> {
     throw err;
   });
   return sqlPromise;
+}
+
+/**
+ * Run `fn` in one database transaction: everything it does through `tx` commits
+ * together or not at all. Only use `tx` inside — on PGLite another `getSql()`
+ * query would wait for this transaction to finish (deadlock), and on Postgres
+ * it would run outside the transaction. Do validation reads before calling.
+ */
+export async function withTransaction<T>(fn: (tx: Sql) => Promise<T>): Promise<T> {
+  await getSql();
+  if (dbSource === "pglite") {
+    const pg = await globalRef.__pgliteInstance__;
+    if (!pg) throw new Error("PGLite instance failed to initialize");
+    return pg.transaction(async (t) =>
+      fn(toSql(async <R>(text: string, params: unknown[]) => (await t.query<R>(text, params)).rows)),
+    );
+  }
+  const pool = globalRef.__pgPool__;
+  if (!pool) throw new Error("Postgres pool failed to initialize");
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const result = await fn(
+      toSql(async <R>(text: string, params: unknown[]) => (await client.query(text, params)).rows as R[]),
+    );
+    await client.query("commit");
+    return result;
+  } catch (err) {
+    await client.query("rollback").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /**

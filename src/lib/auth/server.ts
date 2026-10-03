@@ -236,6 +236,17 @@ export const auth = betterAuth({
         },
       },
     },
+    session: {
+      create: {
+        // A disabled login can't sign in (Edit user → Status).
+        before: async (session) => {
+          const { DISABLED_MESSAGE, isLoginDisabled } = await import("./disabled.server");
+          if (await isLoginDisabled(session.userId)) {
+            throw new APIError("FORBIDDEN", { message: DISABLED_MESSAGE });
+          }
+        },
+      },
+    },
   },
 
   // `__Host-` prefixed cookies: the browser REFUSES any same-named cookie that
