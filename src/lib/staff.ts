@@ -267,8 +267,10 @@ async function provisionLogin(email: string, source: StaffAccount | null) {
     insert into "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
     values (${id}, ${display}, ${email}, true, ${now}, ${now})
   `;
-  const agencyId = source?.agencyId || "home";
-  const shiftId = source?.activeShiftId || source?.shiftId || "default";
+  // Copy the source login's placement; never invent one (`home` / the deleted
+  // `default` shift). With nothing to copy the login starts unassigned.
+  const agencyId = source?.agencyId || null;
+  const shiftId = source?.activeShiftId || source?.shiftId || null;
   const isOwner = emailKey(email) === OWNER_LOGIN;
   if (isOwner) {
     await sql`
@@ -282,12 +284,14 @@ async function provisionLogin(email: string, source: StaffAccount | null) {
       values (${id}, ${email}, ${display}, ${"admin"}, ${source?.officerId ?? null}, ${shiftId}, ${shiftId}, ${agencyId}, false)
       on conflict (user_id) do nothing
     `;
-    await sql`
-      insert into agency_members (user_id, agency_id, permission, officer_id, agency_admin)
-      values (${id}, ${agencyId}, ${"admin"}, ${source?.officerId ?? null}, false)
-      on conflict (user_id, agency_id) do update
-        set permission = excluded.permission, agency_admin = excluded.agency_admin
-    `;
+    if (agencyId) {
+      await sql`
+        insert into agency_members (user_id, agency_id, permission, officer_id, agency_admin)
+        values (${id}, ${agencyId}, ${"admin"}, ${source?.officerId ?? null}, false)
+        on conflict (user_id, agency_id) do update
+          set permission = excluded.permission, agency_admin = excluded.agency_admin
+      `;
+    }
   }
   if (source?.userId) await copyCredential(source.userId, id);
   return id;
@@ -886,186 +890,540 @@ export const linkMyOfficer = createServerFn({ method: "POST" })
   .validator(z.object({ officerId: z.string().min(1) }))
   .handler(async ({ context, data }) => linkOfficerToSelf(context.userId, data.officerId));
 
+export type StaffScope = "shift" | "agency" | "all" | "unassigned";
+
+type ListedRow = StaffRow & {
+  agency_name: string | null;
+  shift_name: string | null;
+  agency_admin: boolean | null;
+  unassigned: boolean | null;
+};
+
+/**
+ * Every non-owner login with its agency / shift names and an `unassigned`
+ * flag, using the same rule as isUnassignedLogin(): no (existing) agency, or
+ * below division leader with no home shift inside that agency. `"user"` rows
+ * that never got a staff_accounts row are listed as unassigned too.
+ */
+const LISTED_STAFF_SQL = `
+  select s.user_id, s.email, s.name, s.permission, s.officer_id, s.shift_id, s.active_shift_id,
+         s.agency_id, s.viewing_agency_id, s.is_owner, s.cap_overrides,
+         a.name as agency_name, sh.name as shift_name,
+         coalesce(m.agency_admin, false) as agency_admin,
+         (a.id is null
+           or (s.permission <> 'captain' and coalesce(m.agency_admin, false) = false and sh.id is null)
+         ) as unassigned
+  from staff_accounts s
+  left join agencies a on a.id = s.agency_id
+  left join shifts sh
+    on sh.id = coalesce(nullif(s.shift_id, ''), nullif(s.active_shift_id, ''))
+   and sh.agency_id = s.agency_id
+  left join agency_members m on m.user_id = s.user_id and m.agency_id = s.agency_id
+  where coalesce(s.is_owner, false) = false
+  union all
+  select u.id, lower(u.email), u.name, 'officer', null, null, null,
+         null, null, false, null,
+         null, null, false, true
+  from "user" u
+  where not exists (select 1 from staff_accounts s2 where s2.user_id = u.id)
+`;
+
+/** Logins nobody has placed on an agency/shift (the owner's Unassigned list). */
+export async function countUnassignedLogins(): Promise<number> {
+  await ensureTables();
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const rows = await sql.query<{ n: number }>(
+    `select count(*)::int as n from (${LISTED_STAFF_SQL}) x where x.unassigned`,
+  );
+  return rows[0]?.n ?? 0;
+}
+
+async function loadListedStaff(scope: StaffScope, agencyId: string, shiftId: string) {
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const base = `select * from (${LISTED_STAFF_SQL}) x`;
+  const order = ` order by x.permission, x.name`;
+  switch (scope) {
+    case "unassigned":
+      return sql.query<ListedRow>(`${base} where x.unassigned${order}`);
+    case "all":
+      return sql.query<ListedRow>(`${base}${order}`);
+    case "agency":
+      // Division leaders included here (the shift view leaves them out).
+      return sql.query<ListedRow>(`${base} where x.agency_id = $1${order}`, [agencyId]);
+    case "shift":
+      return sql.query<ListedRow>(
+        `${base}
+         where x.agency_id = $1
+           and x.permission <> 'captain'
+           and (
+             x.shift_id = $2
+             or ((x.shift_id is null or x.shift_id = '') and x.active_shift_id = $2)
+           )${order}`,
+        [agencyId, shiftId],
+      );
+  }
+}
+
+export async function listStaffFor(userId: string, scope: StaffScope = "shift") {
+  const me = await requireCap(userId, "manageAccounts");
+  if (scope === "agency" && !me.caps.manageAgency) {
+    throw new Error("Only a division leader can list the whole agency.");
+  }
+  if ((scope === "all" || scope === "unassigned") && !me.caps.managePlatform) {
+    throw new Error("Only the operator can list every agency.");
+  }
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const { currentAgencyIdFor, loadAgency } = await import("@/lib/agencies");
+  const { activeShiftIdFor, loadShift, listShiftRows } = await import("@/lib/shifts");
+  const agencyId = await currentAgencyIdFor(userId);
+  const shiftId = await activeShiftIdFor(userId);
+  const shift = shiftId ? await loadShift(shiftId) : null;
+  const agency = agencyId ? await loadAgency(agencyId) : null;
+  const people = await loadListedStaff(scope, agencyId, shiftId);
+  // Pending reset codes for anyone the caller may manage (not only this
+  // shift's list: division leaders cover commanders and the whole agency).
+  const resets = await sql<ResetRow & StaffRow & { agency_admin: boolean | null }>`
+    select r.id, r.email, r.code, to_char(r.expires_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as expires_at, r.used,
+           s.user_id, s.name, s.permission, s.officer_id, s.shift_id, s.active_shift_id,
+           s.agency_id, s.is_owner, m.agency_admin
+    from password_resets r
+    join staff_accounts s on s.user_id = r.user_id
+    left join agency_members m on m.user_id = s.user_id and m.agency_id = s.agency_id
+    where r.used = false and r.expires_at > now() and r.user_id is not null
+    order by r.created_at desc
+  `;
+  const officers = shiftId
+    ? await sql<{ id: string; name: string }>`
+        select id, name from officers where shift_id = ${shiftId} order by rank_sort, name
+      `
+    : [];
+  const shifts = await listShiftRows(agencyId);
+  const userIds = people.map((p) => p.user_id);
+  const loginRows =
+    userIds.length > 0
+      ? await sql.query<{ user_id: string; last_login: string | null }>(
+          `select "userId" as user_id,
+                  to_char(max("createdAt") at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as last_login
+           from "session"
+           where "userId" = any($1::text[])
+           group by "userId"`,
+          [userIds],
+        )
+      : [];
+  const lastLoginByUser = new Map(
+    loginRows.map((r) => [r.user_id, r.last_login] as const),
+  );
+  const actor: StaffActor = {
+    userId: me.userId,
+    permission: me.permission,
+    isOwner: me.isOwner,
+    manageAgency: me.caps.manageAgency,
+    managePlatform: me.caps.managePlatform,
+    agencyId: agencyId || null,
+    shiftId: shiftId || null,
+  };
+  // The operator places logins on any agency + shift (Unassigned → Assign).
+  const placement = me.caps.managePlatform ? await listPlacementOptions() : null;
+  return {
+    scope,
+    people: people.map((p) => {
+      const staff = mapStaff(p);
+      const extras = { agencyAdmin: Boolean(p.agency_admin) };
+      const caps = capsFor(staff.permission, extras, staff.capOverrides);
+      const defaults = defaultCapsFor(staff.permission, extras);
+      const manageBlock = staffManageBlock(actor, staffTargetFor(staff, extras.agencyAdmin));
+      const self = p.user_id === me.userId;
+      return {
+        ...staff,
+        agencyName: p.agency_name,
+        shiftName: p.shift_name,
+        /** No agency, or no valid shift in it: sees nothing until placed. */
+        unassigned: Boolean(p.unassigned),
+        lastLoginAt: lastLoginByUser.get(p.user_id) ?? null,
+        toggles: pickToggles(caps),
+        defaultToggles: pickToggles(defaults),
+        /** Role, shift, password and delete controls. */
+        manageable: manageBlock === null,
+        /** Why the controls are locked (null when manageable). */
+        lockedReason: self ? "This is your login." : manageBlock,
+        /** Your own officer link stays editable. */
+        canLinkOfficer: manageBlock === null || self,
+        customizable: manageBlock === null && capsAreCustomizable(staff.permission, extras),
+      };
+    }),
+    resets: resets
+      .filter(
+        (r) =>
+          staffManageBlock(actor, staffTargetFor(mapStaff(r), Boolean(r.agency_admin))) === null,
+      )
+      .map((r) => ({
+        id: r.id,
+        name: r.name,
+        email: r.email,
+        code: r.code,
+        expiresAt: r.expires_at,
+      })),
+    officers,
+    agency: agency ? { id: agency.id, name: agency.name } : null,
+    shift: shift ? { id: shift.id, name: shift.name } : null,
+    shifts: shifts.map((s) => ({ id: s.id, name: s.name })),
+    unassignedCount: me.caps.managePlatform ? await countUnassignedLogins() : null,
+    placement,
+  };
+}
+
+/** Every agency with its shifts, for the operator's Assign control. */
+async function listPlacementOptions() {
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const agencies = await sql<{ id: string; name: string }>`
+    select id, name from agencies order by name
+  `;
+  const shifts = await sql<{ id: string; name: string; agency_id: string | null }>`
+    select id, name, agency_id from shifts order by start_time asc, name asc
+  `;
+  return agencies.map((a) => ({
+    id: a.id,
+    name: a.name,
+    shifts: shifts.filter((s) => s.agency_id === a.id).map((s) => ({ id: s.id, name: s.name })),
+  }));
+}
+
 export const listStaff = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .handler(async ({ context }) => {
-    const me = await requireCap(context.userId, "manageAccounts");
-    const { getSql } = await import("@/lib/db");
-    const sql = await getSql();
-    const { currentAgencyIdFor } = await import("@/lib/agencies");
-    const { activeShiftIdFor, loadShift, listShiftRows } = await import("@/lib/shifts");
-    const agencyId = await currentAgencyIdFor(context.userId);
-    const shiftId = await activeShiftIdFor(context.userId);
-    const shift = shiftId ? await loadShift(shiftId) : null;
-    const people = await sql<StaffRow>`
-      select user_id, email, name, permission, officer_id, shift_id, active_shift_id, agency_id, viewing_agency_id, is_owner, cap_overrides
-      from staff_accounts
-      where coalesce(is_owner, false) = false
-        and agency_id = ${agencyId}
-        and permission <> ${"captain"}
-        and (
-          shift_id = ${shiftId}
-          or (
-            (shift_id is null or shift_id = '')
-            and active_shift_id = ${shiftId}
-          )
-        )
-      order by permission, name
+  .validator(
+    z.object({ scope: z.enum(["shift", "agency", "all", "unassigned"]).optional() }).optional(),
+  )
+  .handler(async ({ context, data }) => listStaffFor(context.userId, data?.scope ?? "shift"));
+
+/**
+ * Where "Add user" / "Attach" put a login: the caller's current agency and
+ * their current shift, which must exist and belong to that agency. No
+ * `default` / `home` fallbacks (the `default` shift was deleted, 30c9155).
+ */
+async function resolveAddTarget(
+  actorId: string,
+  permission: Permission,
+): Promise<{ agencyId: string; shiftId: string | null }> {
+  const { currentAgencyIdFor } = await import("@/lib/agencies");
+  const { activeShiftIdFor, loadShift } = await import("@/lib/shifts");
+  const agencyId = await currentAgencyIdFor(actorId);
+  if (!agencyId) throw new Error("Pick an agency under WatchBoard before adding users.");
+  // Division leaders sit on the agency, not a shift.
+  if (permission === "captain") return { agencyId, shiftId: null };
+  const shiftId = await activeShiftIdFor(actorId);
+  const shift = shiftId ? await loadShift(shiftId) : null;
+  if (!shift || !shift.agencyId || shift.agencyId !== agencyId) {
+    throw new Error("Pick a shift under WatchBoard before adding users.");
+  }
+  return { agencyId, shiftId: shift.id };
+}
+
+/**
+ * Validate an agency + shift (+ optional roster officer) a login is about to
+ * be placed on. Division leaders get no shift.
+ */
+async function checkPlacement(input: {
+  userId: string;
+  agencyId: string;
+  shiftId: string | null;
+  permission: Permission;
+  officerId: string | null;
+}): Promise<{ shiftId: string | null }> {
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const agency = await sql<{ id: string }>`select id from agencies where id = ${input.agencyId}`;
+  if (!agency[0]) throw new Error("Agency not found.");
+  const shiftId = input.permission === "captain" ? null : input.shiftId;
+  if (input.permission !== "captain") {
+    if (!shiftId) throw new Error("Pick a shift for this login.");
+    const shift = await sql<{ id: string }>`
+      select id from shifts where id = ${shiftId} and agency_id = ${input.agencyId}
     `;
-    // Pending reset codes for anyone the caller may manage (not only this
-    // shift's list: division leaders cover commanders and the whole agency).
-    const resets = await sql<ResetRow & StaffRow & { agency_admin: boolean | null }>`
-      select r.id, r.email, r.code, to_char(r.expires_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as expires_at, r.used,
-             s.user_id, s.name, s.permission, s.officer_id, s.shift_id, s.active_shift_id,
-             s.agency_id, s.is_owner, m.agency_admin
-      from password_resets r
-      join staff_accounts s on s.user_id = r.user_id
-      left join agency_members m on m.user_id = s.user_id and m.agency_id = s.agency_id
-      where r.used = false and r.expires_at > now() and r.user_id is not null
-      order by r.created_at desc
-    `;
-    const officers = shiftId
-      ? await sql<{ id: string; name: string }>`
-          select id, name from officers where shift_id = ${shiftId} order by rank_sort, name
-        `
-      : [];
-    const shifts = await listShiftRows(agencyId);
-    const userIds = people.map((p) => p.user_id);
-    const loginRows =
-      userIds.length > 0
-        ? await sql.query<{ user_id: string; last_login: string | null }>(
-            `select "userId" as user_id,
-                    to_char(max("createdAt") at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as last_login
-             from "session"
-             where "userId" = any($1::text[])
-             group by "userId"`,
-            [userIds],
-          )
-        : [];
-    const lastLoginByUser = new Map(
-      loginRows.map((r) => [r.user_id, r.last_login] as const),
-    );
-    const agencyAdmins = new Set(
-      userIds.length > 0
-        ? (
-            await sql.query<{ user_id: string }>(
-              `select user_id from agency_members where agency_admin = true and user_id = any($1::text[])`,
-              [userIds],
-            )
-          ).map((r) => r.user_id)
-        : [],
-    );
-    const actor: StaffActor = {
-      userId: me.userId,
-      permission: me.permission,
-      isOwner: me.isOwner,
-      manageAgency: me.caps.manageAgency,
-      managePlatform: me.caps.managePlatform,
-      agencyId: agencyId || null,
-      shiftId: shiftId || null,
-    };
-    return {
-      people: people.map((p) => {
-        const staff = mapStaff(p);
-        const extras = { agencyAdmin: agencyAdmins.has(p.user_id) };
-        const caps = capsFor(staff.permission, extras, staff.capOverrides);
-        const defaults = defaultCapsFor(staff.permission, extras);
-        const manageBlock = staffManageBlock(actor, staffTargetFor(staff, extras.agencyAdmin));
-        const self = p.user_id === me.userId;
-        return {
-          ...staff,
-          lastLoginAt: lastLoginByUser.get(p.user_id) ?? null,
-          toggles: pickToggles(caps),
-          defaultToggles: pickToggles(defaults),
-          /** Role, shift, password and delete controls. */
-          manageable: manageBlock === null,
-          /** Why the controls are locked (null when manageable). */
-          lockedReason: self ? "This is your login." : manageBlock,
-          /** Your own officer link stays editable. */
-          canLinkOfficer: manageBlock === null || self,
-          customizable: manageBlock === null && capsAreCustomizable(staff.permission, extras),
-        };
-      }),
-      resets: resets
-        .filter(
-          (r) =>
-            staffManageBlock(actor, staffTargetFor(mapStaff(r), Boolean(r.agency_admin))) === null,
-        )
-        .map((r) => ({
-          id: r.id,
-          name: r.name,
-          email: r.email,
-          code: r.code,
-          expiresAt: r.expires_at,
-        })),
-      officers,
-      shift: shift ? { id: shift.id, name: shift.name } : null,
-      shifts: shifts.map((s) => ({ id: s.id, name: s.name })),
-    };
+    if (!shift[0]) throw new Error("That shift is not in the selected agency.");
+  }
+  if (input.officerId) {
+    const block = officerLinkBlock({
+      officer: await officerPlacement(input.officerId),
+      agencyId: input.agencyId,
+      shiftId,
+      agencyWide: !shiftId,
+      linkedToOther: await officerLinkedElsewhere(input.officerId, input.userId),
+    });
+    if (block) throw new Error(block);
+  }
+  return { shiftId };
+}
+
+/**
+ * Put an existing login on an agency + shift: staff_accounts and the single
+ * agency_members row move together (a non-owner login has one home agency).
+ */
+async function placeLogin(input: {
+  userId: string;
+  agencyId: string;
+  shiftId: string | null;
+  permission: Permission;
+  officerId: string | null;
+}) {
+  await ensureStaff(input.userId);
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  await sql`
+    update staff_accounts
+    set agency_id = ${input.agencyId},
+        shift_id = ${input.shiftId},
+        active_shift_id = ${input.shiftId},
+        viewing_agency_id = null,
+        permission = ${input.permission},
+        officer_id = ${input.officerId},
+        -- A new role starts from its own defaults.
+        cap_overrides = case when permission = ${input.permission} then cap_overrides else null end
+    where user_id = ${input.userId}
+  `;
+  await sql`delete from agency_members where user_id = ${input.userId} and agency_id <> ${input.agencyId}`;
+  await sql`
+    insert into agency_members (user_id, agency_id, permission, officer_id, agency_admin)
+    values (${input.userId}, ${input.agencyId}, ${input.permission}, ${input.officerId}, ${input.permission === "captain"})
+    on conflict (user_id, agency_id) do update
+      set permission = excluded.permission,
+          officer_id = excluded.officer_id,
+          agency_admin = excluded.agency_admin
+  `;
+}
+
+/** Loads the target of an attach/assign (creating its staff row if missing). */
+async function loadAttachTarget(userId: string) {
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const users = await sql<{ id: string; name: string; email: string }>`
+    select id, name, email from "user" where id = ${userId}
+  `;
+  if (!users[0]) throw new Error("Account not found.");
+  const target = await ensureStaff(userId);
+  const agencyAdmin = await isAgencyAdminMember(userId, target.agencyId);
+  const unassigned = isUnassignedLogin(await loginAssignment({ ...target, agencyAdmin }));
+  return { user: users[0], target, unassigned };
+}
+
+const createStaffInput = z.object({
+  name: z.string().trim().min(1).max(80),
+  email: z.string().trim().toLowerCase().email().max(254),
+  password: z.string().min(8).max(72),
+  permission: z.enum(["captain", "admin", "supervisor", "dispatcher", "officer"]),
+  officerId: z.string().min(1).optional(),
+});
+
+export type ExistingLoginConflict = {
+  userId: string;
+  name: string;
+  email: string;
+  agencyId: string | null;
+  agencyName: string | null;
+  shiftId: string | null;
+  unassigned: boolean;
+};
+
+/**
+ * Add user. A new email creates a login on the caller's agency + shift. An
+ * email that already has a login (any case) returns `{ conflict }` when the
+ * caller may attach it — it's unassigned, or the caller is the operator —
+ * instead of failing with "That email already has an account".
+ */
+export async function createStaffUserFor(
+  actorId: string,
+  data: z.infer<typeof createStaffInput>,
+): Promise<{ userId: string; conflict?: undefined } | { conflict: ExistingLoginConflict; userId?: undefined }> {
+  const me = await requireCap(actorId, "manageAccounts");
+  if (!assignablePermissions(me.caps).includes(data.permission)) {
+    throw new Error("Ask a division leader to add a shift commander.");
+  }
+  const { agencyId, shiftId } = await resolveAddTarget(actorId, data.permission);
+  const email = emailKey(data.email);
+  const existing = await findUserByEmail(email);
+  if (existing) {
+    const { target, unassigned } = await loadAttachTarget(existing.id);
+    if (target.isOwner || existing.id === me.userId) {
+      throw new Error("That email already has an account.");
+    }
+    if (unassigned || me.caps.managePlatform) {
+      const { loadAgency } = await import("@/lib/agencies");
+      const theirAgency = target.agencyId ? await loadAgency(target.agencyId) : null;
+      return {
+        conflict: {
+          userId: existing.id,
+          name: existing.name,
+          email: existing.email,
+          agencyId: target.agencyId,
+          agencyName: theirAgency?.name ?? null,
+          shiftId: target.shiftId || target.activeShiftId,
+          unassigned,
+        },
+      };
+    }
+    if (target.agencyId !== agencyId) throw new Error("That email belongs to another agency.");
+    throw new Error("That email already has a login on this agency. Find it under People.");
+  }
+  const userId = newId();
+  await checkPlacement({
+    userId,
+    agencyId,
+    shiftId,
+    permission: data.permission,
+    officerId: data.officerId ?? null,
   });
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const now = new Date().toISOString();
+  const password = await hashPassword(data.password);
+  await sql`
+    insert into "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+    values (${userId}, ${data.name}, ${email}, true, ${now}, ${now})
+  `;
+  await sql`
+    insert into "account" (id, "accountId", "providerId", "userId", password, "createdAt", "updatedAt")
+    values (${newId()}, ${userId}, 'credential', ${userId}, ${password}, ${now}, ${now})
+  `;
+  await sql`
+    insert into staff_accounts (user_id, email, name, permission, officer_id, shift_id, active_shift_id, agency_id)
+    values (
+      ${userId},
+      ${email},
+      ${data.name},
+      ${data.permission},
+      ${data.officerId ?? null},
+      ${shiftId},
+      ${shiftId},
+      ${agencyId}
+    )
+  `;
+  await sql`
+    insert into agency_members (user_id, agency_id, permission, officer_id, agency_admin)
+    values (
+      ${userId},
+      ${agencyId},
+      ${data.permission},
+      ${data.officerId ?? null},
+      ${data.permission === "captain"}
+    )
+    on conflict (user_id, agency_id) do update
+      set permission = excluded.permission, agency_admin = excluded.agency_admin
+  `;
+  return { userId };
+}
 
 export const createStaffUser = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(
-    z.object({
-      name: z.string().min(1).max(80),
-      email: z.string().email(),
-      password: z.string().min(8).max(72),
-      permission: z.enum(["captain", "admin", "supervisor", "dispatcher", "officer"]),
-      officerId: z.string().min(1).optional(),
-    }),
-  )
-  .handler(async ({ context, data }) => {
-    const me = await requireCap(context.userId, "manageAccounts");
-    if (!assignablePermissions(me.caps).includes(data.permission)) {
-      throw new Error("Ask a division leader to add a shift commander.");
-    }
-    const shiftId = me.activeShiftId || me.shiftId || "default";
-    const { currentAgencyIdFor } = await import("@/lib/agencies");
-    const agencyId = await currentAgencyIdFor(context.userId);
-    const email = data.email.trim().toLowerCase();
+  .validator(createStaffInput)
+  .handler(async ({ context, data }) => createStaffUserFor(context.userId, data));
+
+const attachInput = z.object({
+  userId: z.string().min(1),
+  permission: z.enum(["captain", "admin", "supervisor", "dispatcher", "officer"]),
+  officerId: z.string().min(1).nullable().optional(),
+  /** Optional: also reset the login's password (signs it out everywhere). */
+  password: z.string().min(8).max(72).optional(),
+});
+
+/**
+ * Attach an existing login (from Add user's conflict) to the caller's agency +
+ * current shift. Anyone who can add users may attach an unassigned login; only
+ * the operator may take a login that already sits on an agency.
+ */
+export async function attachExistingLoginFor(actorId: string, data: z.infer<typeof attachInput>) {
+  const me = await requireCap(actorId, "manageAccounts");
+  if (!assignablePermissions(me.caps).includes(data.permission)) {
+    throw new Error("Ask a division leader to add a shift commander.");
+  }
+  if (data.userId === me.userId) throw new Error("You can’t change your own login here.");
+  const { target, unassigned } = await loadAttachTarget(data.userId);
+  if (target.isOwner) throw new Error("Account not found.");
+  const { agencyId, shiftId } = await resolveAddTarget(actorId, data.permission);
+  if (!unassigned && !me.caps.managePlatform) {
+    throw new Error(
+      target.agencyId === agencyId
+        ? "That login is already on this agency. Find it under People."
+        : "That email belongs to another agency.",
+    );
+  }
+  const roleBlock = roleAssignBlock(await staffActorFor(me), data.permission);
+  if (roleBlock) throw new Error(roleBlock);
+  const placed = await checkPlacement({
+    userId: data.userId,
+    agencyId,
+    shiftId,
+    permission: data.permission,
+    officerId: data.officerId ?? null,
+  });
+  await placeLogin({
+    userId: data.userId,
+    agencyId,
+    shiftId: placed.shiftId,
+    permission: data.permission,
+    officerId: data.officerId ?? null,
+  });
+  if (data.password) {
+    await upsertCredentialPassword(data.userId, data.password);
     const { getSql } = await import("@/lib/db");
     const sql = await getSql();
-    const taken = await sql<{ id: string }>`select id from "user" where email = ${email}`;
-    if (taken[0]) throw new Error("That email already has an account.");
-    const userId = newId();
-    const now = new Date().toISOString();
-    const password = await hashPassword(data.password);
-    await sql`
-      insert into "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
-      values (${userId}, ${data.name.trim()}, ${email}, true, ${now}, ${now})
-    `;
-    await sql`
-      insert into "account" (id, "accountId", "providerId", "userId", password, "createdAt", "updatedAt")
-      values (${newId()}, ${userId}, 'credential', ${userId}, ${password}, ${now}, ${now})
-    `;
-    await sql`
-      insert into staff_accounts (user_id, email, name, permission, officer_id, shift_id, active_shift_id, agency_id)
-      values (
-        ${userId},
-        ${email},
-        ${data.name.trim()},
-        ${data.permission},
-        ${data.officerId ?? null},
-        ${shiftId},
-        ${shiftId},
-        ${agencyId}
-      )
-    `;
-    await sql`
-      insert into agency_members (user_id, agency_id, permission, officer_id, agency_admin)
-      values (
-        ${userId},
-        ${agencyId},
-        ${data.permission},
-        ${data.officerId ?? null},
-        ${data.permission === "captain"}
-      )
-      on conflict (user_id, agency_id) do update
-        set permission = excluded.permission, agency_admin = excluded.agency_admin
-    `;
-    return { userId };
+    await sql`delete from "session" where "userId" = ${data.userId}`;
+  }
+  return { userId: data.userId, agencyId, shiftId: placed.shiftId };
+}
+
+export const attachExistingLogin = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(attachInput)
+  .handler(async ({ context, data }) => attachExistingLoginFor(context.userId, data));
+
+const assignInput = z.object({
+  userId: z.string().min(1),
+  agencyId: z.string().min(1),
+  shiftId: z.string().min(1).nullable().optional(),
+  permission: z.enum(["captain", "admin", "supervisor", "dispatcher", "officer"]).optional(),
+});
+
+/** Operator only: place any login (typically an Unassigned one) on an agency + shift. */
+export async function assignLoginFor(actorId: string, data: z.infer<typeof assignInput>) {
+  const me = await requireCap(actorId, "managePlatform");
+  if (data.userId === me.userId) throw new Error("You can’t change your own login here.");
+  const { target } = await loadAttachTarget(data.userId);
+  if (target.isOwner) throw new Error("Account not found.");
+  const permission = data.permission ?? target.permission;
+  if (target.permission === "admin" && permission !== "admin" && (await adminCount()) <= 1) {
+    throw new Error("Keep at least one admin on the shift.");
+  }
+  // Keep the roster link only if it is still valid on the new shift.
+  let officerId = target.officerId;
+  if (officerId) {
+    const at = await officerPlacement(officerId);
+    const nextShift = permission === "captain" ? null : (data.shiftId ?? null);
+    if (!at || at.agencyId !== data.agencyId || (nextShift && at.shiftId !== nextShift)) officerId = null;
+  }
+  const placed = await checkPlacement({
+    userId: data.userId,
+    agencyId: data.agencyId,
+    shiftId: data.shiftId ?? null,
+    permission,
+    officerId,
   });
+  await placeLogin({
+    userId: data.userId,
+    agencyId: data.agencyId,
+    shiftId: placed.shiftId,
+    permission,
+    officerId,
+  });
+  return { ok: true as const };
+}
+
+export const assignLogin = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(assignInput)
+  .handler(async ({ context, data }) => assignLoginFor(context.userId, data));
 
 export const setStaffPermission = createServerFn({ method: "POST" })
   .middleware([authMiddleware])

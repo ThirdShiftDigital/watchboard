@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
@@ -25,6 +25,8 @@ import {
 } from "@/lib/access";
 import { useMyAccess, usePendingCount } from "@/lib/hooks";
 import {
+  assignLogin,
+  attachExistingLogin,
   changeMyPassword,
   claimShiftCommand,
   createStaffUser,
@@ -34,9 +36,21 @@ import {
   setStaffCaps,
   setStaffPassword,
   setStaffPermission,
+  type ExistingLoginConflict,
+  type StaffScope,
 } from "@/lib/staff";
 
-export const Route = createFileRoute("/account")({ component: AccountPage });
+const SCOPES: readonly StaffScope[] = ["shift", "agency", "all", "unassigned"];
+
+export const Route = createFileRoute("/account")({
+  component: AccountPage,
+  validateSearch: (search: Record<string, unknown>): { scope?: StaffScope } => {
+    const scope = SCOPES.find((s) => s === search.scope);
+    return scope && scope !== "shift" ? { scope } : {};
+  },
+});
+
+type PlacementOption = { id: string; name: string; shifts: { id: string; name: string }[] };
 
 function AccountPage() {
   const { user, isPending } = useCurrentUserState();
@@ -44,11 +58,33 @@ function AccountPage() {
   const access = useMyAccess();
   const queryClient = useQueryClient();
   const mine = access.data;
+  const navigate = useNavigate({ from: "/account" });
+  const requested = Route.useSearch().scope ?? "shift";
+  // Fall back to the shift view when the caller can't use the requested list.
+  const scope: StaffScope =
+    (requested === "agency" && mine?.caps.manageAgency) ||
+    ((requested === "all" || requested === "unassigned") && mine?.caps.managePlatform)
+      ? requested
+      : "shift";
   const staffQuery = useQuery({
-    queryKey: ["staff", mine?.activeShiftId, mine?.agencyId],
-    queryFn: () => listStaff(),
+    queryKey: ["staff", mine?.activeShiftId, mine?.agencyId, scope],
+    queryFn: () => listStaff({ data: { scope } }),
     enabled: Boolean(mine?.caps.manageAccounts),
   });
+  const scopeOptions: [StaffScope, string][] = [["shift", "This shift"]];
+  if (mine?.caps.manageAgency) scopeOptions.push(["agency", "This agency"]);
+  if (mine?.caps.managePlatform) {
+    scopeOptions.push(["all", "All agencies"]);
+    scopeOptions.push(["unassigned", `Unassigned (${staffQuery.data?.unassignedCount ?? 0})`]);
+  }
+  const scopeTitle =
+    scope === "unassigned"
+      ? "Unassigned"
+      : scope === "all"
+        ? "All agencies"
+        : scope === "agency"
+          ? (staffQuery.data?.agency?.name ?? "This agency")
+          : (staffQuery.data?.shift?.name ?? "This shift");
   const [panel, setPanel] = useState<"people" | "add" | "me">("people");
   const [selectedId, setSelectedId] = useState("");
   const [filter, setFilter] = useState("");
@@ -86,9 +122,15 @@ function AccountPage() {
         <div className="shrink-0">
           <p className="font-display text-3xl font-semibold uppercase tracking-wide">Accounts</p>
           <p className="mt-1 text-sm text-muted">
-            {canManage
-              ? `Logins for ${staffQuery.data?.shift?.name ?? "the selected shift"} only. Switch shift under WatchBoard to see another.`
-              : "Your login and password."}
+            {!canManage
+              ? "Your login and password."
+              : scope === "unassigned"
+                ? "Logins with no agency or shift. They see nothing until you assign them."
+                : scope === "all"
+                  ? "Every login on every agency."
+                  : scope === "agency"
+                    ? `Every login on ${staffQuery.data?.agency?.name ?? "this agency"}.`
+                    : `Logins for ${staffQuery.data?.shift?.name ?? "the selected shift"} only. Switch shift under WatchBoard to see another.`}
           </p>
           {mine?.caps.manageAgency ? (
             <p className="mt-1 text-sm text-muted">
@@ -150,8 +192,26 @@ function AccountPage() {
           <div className="grid min-h-0 flex-1 gap-4 md:grid-cols-[17rem_minmax(0,1fr)]">
             <aside className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-card">
               <div className="shrink-0 space-y-2 border-b border-border p-2">
+                {scopeOptions.length > 1 ? (
+                  <select
+                    aria-label="Which logins"
+                    className="flex h-9 w-full rounded-md border border-border-strong bg-background px-2 text-sm"
+                    value={scope}
+                    onChange={(e) => {
+                      const next = e.target.value as StaffScope;
+                      setSelectedId("");
+                      void navigate({ search: next === "shift" ? {} : { scope: next } });
+                    }}
+                  >
+                    {scopeOptions.map(([id, label]) => (
+                      <option key={id} value={id}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                ) : null}
                 <p className="px-1 text-2xs uppercase tracking-wide text-muted">
-                  {staffQuery.data?.shift?.name ?? "This shift"} · {people.length} logins
+                  {scopeTitle} · {people.length} logins
                 </p>
                 <Input
                   value={filter}
@@ -162,7 +222,9 @@ function AccountPage() {
               <ul className="min-h-0 flex-1 overflow-y-auto">
                 {visible.length === 0 ? (
                   <li className="px-3 py-6 text-sm text-muted">
-                    No logins on this shift yet. Add a user, or pick another shift.
+                    {scope === "unassigned"
+                      ? "Every login is on an agency and shift."
+                      : "No logins on this shift yet. Add a user, or pick another shift."}
                   </li>
                 ) : (
                   visible.map((person) => {
@@ -181,6 +243,17 @@ function AccountPage() {
                           <p className={cn("truncate text-2xs", on ? "text-primary-foreground/80" : "text-muted")}>
                             {permissionLabel(person.permission)} · {person.email}
                           </p>
+                          {scope !== "shift" ? (
+                            <p className={cn("truncate text-2xs", on ? "text-primary-foreground/80" : "text-muted")}>
+                              {person.unassigned ? (
+                                <span className={on ? "font-semibold" : "font-semibold text-warning"}>
+                                  Unassigned
+                                </span>
+                              ) : (
+                                [person.agencyName, person.shiftName].filter(Boolean).join(" · ")
+                              )}
+                            </p>
+                          ) : null}
                           <p className={cn("truncate text-2xs", on ? "text-primary-foreground/70" : "text-subtle")}>
                             {person.lastLoginAt
                               ? `Last login ${formatStamp(person.lastLoginAt)}`
@@ -197,6 +270,18 @@ function AccountPage() {
               {selected && mine ? (
                 <PersonDetail
                   person={selected}
+                  // Shift and roster controls only make sense for logins on the
+                  // agency + shift you're looking at.
+                  here={
+                    !selected.unassigned &&
+                    selected.agencyId === (staffQuery.data?.agency?.id ?? null)
+                  }
+                  onShift={
+                    !selected.unassigned &&
+                    Boolean(staffQuery.data?.shift?.id) &&
+                    (selected.shiftId || selected.activeShiftId) === staffQuery.data?.shift?.id
+                  }
+                  placement={staffQuery.data?.placement ?? null}
                   mineId={mine.userId}
                   allowed={allowed}
                   officers={staffQuery.data?.officers ?? []}
@@ -220,6 +305,9 @@ function AccountPage() {
             <CreateAccountForm
               officers={staffQuery.data?.officers ?? []}
               allowed={allowed}
+              placeName={[staffQuery.data?.agency?.name, staffQuery.data?.shift?.name]
+                .filter(Boolean)
+                .join(" · ")}
               onCreated={async () => {
                 await queryClient.invalidateQueries({ queryKey: ["staff"] });
                 setPanel("people");
@@ -240,6 +328,9 @@ function AccountPage() {
 
 function PersonDetail({
   person,
+  here,
+  onShift,
+  placement,
   mineId,
   allowed,
   officers,
@@ -255,6 +346,11 @@ function PersonDetail({
     permission: Permission;
     officerId: string | null;
     shiftId: string | null;
+    activeShiftId?: string | null;
+    agencyId?: string | null;
+    agencyName?: string | null;
+    shiftName?: string | null;
+    unassigned?: boolean;
     lastLoginAt?: string | null;
     toggles: Record<ToggleCap, boolean>;
     defaultToggles: Record<ToggleCap, boolean>;
@@ -263,6 +359,11 @@ function PersonDetail({
     lockedReason: string | null;
     canLinkOfficer: boolean;
   };
+  /** On the agency being viewed (shift select is limited to its shifts). */
+  here: boolean;
+  /** On the shift being viewed (the officer list is that shift's roster). */
+  onShift: boolean;
+  placement: PlacementOption[] | null;
   mineId: string;
   allowed: Permission[];
   officers: { id: string; name: string }[];
@@ -277,6 +378,13 @@ function PersonDetail({
         <div>
           <p className="font-display text-xl font-semibold uppercase tracking-wide">{person.name}</p>
           <p className="text-xs text-muted">{person.email}</p>
+          <p className="mt-1 text-2xs uppercase tracking-wide text-muted">
+            {person.unassigned ? (
+              <span className="text-warning">Unassigned — sees nothing yet</span>
+            ) : (
+              [person.agencyName, person.shiftName].filter(Boolean).join(" · ")
+            )}
+          </p>
           <p className="mt-1 text-2xs uppercase tracking-wide text-muted">
             Last login
             <span className="ml-2 normal-case tracking-normal text-foreground">
@@ -295,7 +403,10 @@ function PersonDetail({
             : `${person.lockedReason ?? "Outside your authority."} Role, password and delete are locked.`}
         </p>
       ) : null}
-      {person.manageable ? (
+      {placement && person.userId !== mineId && (person.unassigned || !here) ? (
+        <AssignPanel person={person} placement={placement} allowed={allowed} onChanged={onChanged} />
+      ) : null}
+      {person.manageable && here ? (
         <div>
           <p className="mb-2 text-2xs uppercase tracking-wide text-muted">Permission</p>
           <div className="grid grid-cols-2 gap-2">
@@ -326,8 +437,8 @@ function PersonDetail({
           </div>
         </div>
       ) : null}
-      <PermissionToggles person={person} myCaps={myCaps} onChanged={onChanged} />
-      {canMoveShift && person.manageable && shifts.length > 0 ? (
+      {here ? <PermissionToggles person={person} myCaps={myCaps} onChanged={onChanged} /> : null}
+      {canMoveShift && here && person.manageable && person.permission !== "captain" && shifts.length > 0 ? (
         <div className="space-y-2">
           <Label>Shift</Label>
           <select
@@ -359,7 +470,7 @@ function PersonDetail({
           </select>
         </div>
       ) : null}
-      {person.canLinkOfficer ? (
+      {person.canLinkOfficer && onShift ? (
         <div className="space-y-2">
           <Label>Tied officer</Label>
           <select
@@ -413,6 +524,106 @@ function PersonDetail({
         />
       ) : null}
     </div>
+  );
+}
+
+/** Operator: put a login (usually an Unassigned one) on an agency + shift. */
+function AssignPanel({
+  person,
+  placement,
+  allowed,
+  onChanged,
+}: {
+  person: { userId: string; name: string; permission: Permission; agencyId?: string | null };
+  placement: PlacementOption[];
+  allowed: Permission[];
+  onChanged: () => Promise<void>;
+}) {
+  const [agencyId, setAgencyId] = useState(
+    placement.find((a) => a.id === person.agencyId)?.id ?? placement[0]?.id ?? "",
+  );
+  const agency = placement.find((a) => a.id === agencyId);
+  const [shiftId, setShiftId] = useState("");
+  const [permission, setPermission] = useState<Permission>(
+    person.permission === "admin" || person.permission === "captain" ? "officer" : person.permission,
+  );
+  const needsShift = permission !== "captain";
+  const assign = useMutation({
+    mutationFn: () =>
+      assignLogin({
+        data: {
+          userId: person.userId,
+          agencyId,
+          shiftId: needsShift ? shiftId : null,
+          permission,
+        },
+      }),
+    onSuccess: async () => {
+      toast.success(`${person.name} assigned to ${agency?.name ?? "the agency"}`);
+      await onChanged();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+  return (
+    <form
+      className="space-y-2 rounded-md border border-warning/40 bg-warning/10 p-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        assign.mutate();
+      }}
+    >
+      <p className="text-2xs uppercase tracking-wide text-muted">Assign to an agency</p>
+      <select
+        aria-label="Agency"
+        className="flex h-11 w-full rounded-md border border-border-strong bg-background px-3 text-sm"
+        value={agencyId}
+        onChange={(e) => {
+          setAgencyId(e.target.value);
+          setShiftId("");
+        }}
+      >
+        {placement.map((a) => (
+          <option key={a.id} value={a.id}>
+            {a.name}
+          </option>
+        ))}
+      </select>
+      {needsShift ? (
+        <select
+          aria-label="Shift"
+          className="flex h-11 w-full rounded-md border border-border-strong bg-background px-3 text-sm"
+          value={shiftId}
+          onChange={(e) => setShiftId(e.target.value)}
+          required
+        >
+          <option value="">Pick a shift…</option>
+          {(agency?.shifts ?? []).map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+      ) : null}
+      <select
+        aria-label="Permission"
+        className="flex h-11 w-full rounded-md border border-border-strong bg-background px-3 text-sm"
+        value={permission}
+        onChange={(e) => setPermission(e.target.value as Permission)}
+      >
+        {PERMISSIONS.filter((p) => allowed.includes(p)).map((p) => (
+          <option key={p} value={p}>
+            {permissionLabel(p)}
+          </option>
+        ))}
+      </select>
+      <Button
+        type="submit"
+        className="w-full"
+        disabled={assign.isPending || !agencyId || (needsShift && !shiftId)}
+      >
+        {assign.isPending ? "Assigning…" : "Assign"}
+      </Button>
+    </form>
   );
 }
 
@@ -639,12 +850,17 @@ function PasswordForm({
 function CreateAccountForm({
   officers,
   allowed,
+  placeName,
   onCreated,
 }: {
   officers: { id: string; name: string }[];
   allowed: Permission[];
+  /** "Agency · Shift" the new login lands on. */
+  placeName: string;
   onCreated: () => Promise<void>;
 }) {
+  const [conflict, setConflict] = useState<ExistingLoginConflict | null>(null);
+  const [resetPassword, setResetPassword] = useState(false);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -661,12 +877,40 @@ function CreateAccountForm({
           officerId: officerId || undefined,
         },
       }),
-    onSuccess: async () => {
+    onSuccess: async (res) => {
+      if (res.conflict) {
+        // The email already has a login nobody placed (or the operator is
+        // adding): offer to attach it instead of failing.
+        setConflict(res.conflict);
+        setResetPassword(false);
+        return;
+      }
       setName("");
       setEmail("");
       setPassword("");
       setOfficerId("");
       toast.success("Account created");
+      await onCreated();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+  const attach = useMutation({
+    mutationFn: (existing: ExistingLoginConflict) =>
+      attachExistingLogin({
+        data: {
+          userId: existing.userId,
+          permission,
+          officerId: officerId || null,
+          password: resetPassword && password.length >= 8 ? password : undefined,
+        },
+      }),
+    onSuccess: async () => {
+      toast.success(`${conflict?.name ?? "Login"} attached`);
+      setConflict(null);
+      setName("");
+      setEmail("");
+      setPassword("");
+      setOfficerId("");
       await onCreated();
     },
     onError: (err) => toast.error(err.message),
@@ -681,7 +925,43 @@ function CreateAccountForm({
       }}
     >
       <p className="font-display text-lg font-semibold uppercase tracking-wide">Add user</p>
-      <p className="text-sm text-muted">Create a login for the shift selected under WatchBoard.</p>
+      <p className="text-sm text-muted">
+        Create a login for {placeName || "the shift selected under WatchBoard"}.
+      </p>
+      {conflict ? (
+        <div className="space-y-2 rounded-md border border-warning/40 bg-warning/10 p-3 text-sm">
+          <p>
+            <span className="font-semibold">{conflict.email}</span> already has a login
+            {conflict.unassigned
+              ? " with no agency yet."
+              : ` on ${conflict.agencyName ?? "another agency"}.`}
+          </p>
+          <p className="text-muted">
+            Attach it to {placeName || "this shift"} as {permissionLabel(permission)}? Their name
+            and password stay as they are{resetPassword ? " (password will be replaced)" : ""}.
+          </p>
+          <label className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={resetPassword}
+              onChange={(e) => setResetPassword(e.target.checked)}
+            />
+            Also set the temporary password above (signs them out)
+          </label>
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              disabled={attach.isPending}
+              onClick={() => attach.mutate(conflict)}
+            >
+              {attach.isPending ? "Attaching…" : "Attach existing login"}
+            </Button>
+            <Button type="button" variant="ghost" onClick={() => setConflict(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : null}
       <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" required />
       <Input
         type="email"

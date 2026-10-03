@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
-import { requireCap } from "@/lib/staff";
+import { countUnassignedLogins, requireCap } from "@/lib/staff";
 import { ensureAgencies, currentAgencyIdFor } from "@/lib/agencies";
 import { ensureSetups } from "@/lib/setups";
 import { loadShift } from "@/lib/shifts";
@@ -98,6 +98,8 @@ export const loadDashboard = createServerFn({ method: "POST" })
         people: owner
           ? staffCounts.reduce((n, r) => n + r.n, 0)
           : (staffByAgency.get(agencyId) ?? 0),
+        /** Operator only: logins with no agency / shift (see Accounts → Unassigned). */
+        unassigned: owner ? await countUnassignedLogins() : 0,
       },
       agencies: agencies.map((a) => ({
         id: a.id,
