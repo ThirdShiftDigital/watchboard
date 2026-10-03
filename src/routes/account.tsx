@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/cn";
 import { formatStamp } from "@/lib/dates";
+import { ROLES, roleLabel } from "@/lib/types";
 import {
   CAP_INFO,
   PERMISSIONS,
@@ -36,6 +37,7 @@ import {
   setStaffCaps,
   setStaffPassword,
   setStaffPermission,
+  updateStaffUser,
   type ExistingLoginConflict,
   type StaffScope,
 } from "@/lib/staff";
@@ -51,6 +53,13 @@ export const Route = createFileRoute("/account")({
 });
 
 type PlacementOption = { id: string; name: string; shifts: { id: string; name: string }[] };
+type RosterOption = {
+  id: string;
+  name: string;
+  role: string;
+  shiftId: string | null;
+  agencyId: string | null;
+};
 
 function AccountPage() {
   const { user, isPending } = useCurrentUserState();
@@ -239,7 +248,14 @@ function AccountPage() {
                           )}
                           onClick={() => setSelectedId(person.userId)}
                         >
-                          <p className="truncate text-sm font-medium">{person.name}</p>
+                          <p className="truncate text-sm font-medium">
+                            {person.name}
+                            {person.disabled ? (
+                              <span className={cn("ml-2 text-2xs uppercase", on ? "" : "text-warning")}>
+                                Disabled
+                              </span>
+                            ) : null}
+                          </p>
                           <p className={cn("truncate text-2xs", on ? "text-primary-foreground/80" : "text-muted")}>
                             {permissionLabel(person.permission)} · {person.email}
                           </p>
@@ -282,6 +298,9 @@ function AccountPage() {
                     (selected.shiftId || selected.activeShiftId) === staffQuery.data?.shift?.id
                   }
                   placement={staffQuery.data?.placement ?? null}
+                  roster={staffQuery.data?.roster ?? null}
+                  agencyShifts={staffQuery.data?.shifts ?? []}
+                  isOwner={Boolean(mine.caps.managePlatform)}
                   mineId={mine.userId}
                   allowed={allowed}
                   officers={staffQuery.data?.officers ?? []}
@@ -331,6 +350,9 @@ function PersonDetail({
   here,
   onShift,
   placement,
+  roster,
+  agencyShifts,
+  isOwner,
   mineId,
   allowed,
   officers,
@@ -351,6 +373,9 @@ function PersonDetail({
     agencyName?: string | null;
     shiftName?: string | null;
     unassigned?: boolean;
+    rank?: string | null;
+    disabled?: boolean;
+    editable?: boolean;
     lastLoginAt?: string | null;
     toggles: Record<ToggleCap, boolean>;
     defaultToggles: Record<ToggleCap, boolean>;
@@ -364,6 +389,10 @@ function PersonDetail({
   /** On the shift being viewed (the officer list is that shift's roster). */
   onShift: boolean;
   placement: PlacementOption[] | null;
+  roster: RosterOption[] | null;
+  /** Shifts of the agency being viewed (division leaders' shift list). */
+  agencyShifts: { id: string; name: string }[];
+  isOwner: boolean;
   mineId: string;
   allowed: Permission[];
   officers: { id: string; name: string }[];
@@ -372,6 +401,7 @@ function PersonDetail({
   myCaps: Caps;
   onChanged: () => Promise<void>;
 }) {
+  const [editing, setEditing] = useState(false);
   return (
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-3">
@@ -392,10 +422,36 @@ function PersonDetail({
             </span>
           </p>
         </div>
-        <Badge tone={person.permission === "captain" || person.permission === "admin" ? "success" : "neutral"}>
-          {permissionLabel(person.permission)}
-        </Badge>
+        <div className="flex flex-col items-end gap-1">
+          <Badge tone={person.permission === "captain" || person.permission === "admin" ? "success" : "neutral"}>
+            {permissionLabel(person.permission)}
+          </Badge>
+          {person.rank ? <Badge tone="neutral">{roleLabel(person.rank as (typeof ROLES)[number]["id"])}</Badge> : null}
+          {person.disabled ? <Badge tone="warning">Disabled</Badge> : null}
+        </div>
       </div>
+      {person.editable && roster ? (
+        editing ? (
+          <EditDetailsForm
+            key={person.userId}
+            person={person}
+            self={person.userId === mineId}
+            isOwner={isOwner}
+            allowed={allowed}
+            placement={placement}
+            agencyShifts={agencyShifts}
+            roster={roster}
+            onDone={async (saved) => {
+              setEditing(false);
+              if (saved) await onChanged();
+            }}
+          />
+        ) : (
+          <Button type="button" variant="outline" onClick={() => setEditing(true)}>
+            Edit details
+          </Button>
+        )
+      ) : null}
       {!person.manageable ? (
         <p className="rounded-md border border-border bg-card-2 px-3 py-2 text-xs text-muted">
           {person.userId === mineId
@@ -524,6 +580,267 @@ function PersonDetail({
         />
       ) : null}
     </div>
+  );
+}
+
+const SELECT_CLASS = "flex h-11 w-full rounded-md border border-border-strong bg-background px-3 text-sm";
+
+/**
+ * Edit details (spec §1): name, email, rank, permission, agency (operator),
+ * shift, roster link and Active/Disabled in one save. The server re-checks
+ * every field; this form only hides what the caller can't change.
+ */
+function EditDetailsForm({
+  person,
+  self,
+  isOwner,
+  allowed,
+  placement,
+  agencyShifts,
+  roster,
+  onDone,
+}: {
+  person: {
+    userId: string;
+    name: string;
+    email: string;
+    permission: Permission;
+    officerId: string | null;
+    shiftId: string | null;
+    activeShiftId?: string | null;
+    agencyId?: string | null;
+    rank?: string | null;
+    disabled?: boolean;
+  };
+  self: boolean;
+  isOwner: boolean;
+  allowed: Permission[];
+  placement: PlacementOption[] | null;
+  agencyShifts: { id: string; name: string }[];
+  roster: RosterOption[];
+  onDone: (saved: boolean) => Promise<void>;
+}) {
+  const initial = {
+    name: person.name,
+    email: person.email,
+    rank: person.rank ?? "",
+    permission: person.permission,
+    agencyId: person.agencyId ?? "",
+    shiftId: person.shiftId || person.activeShiftId || "",
+    officerId: person.officerId ?? "",
+    disabled: Boolean(person.disabled),
+  };
+  const [form, setForm] = useState(initial);
+  const [error, setError] = useState<string | null>(null);
+  const set = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) =>
+    setForm((f) => ({ ...f, [key]: value }));
+  const shiftOptions = isOwner
+    ? (placement?.find((a) => a.id === form.agencyId)?.shifts ?? [])
+    : agencyShifts;
+  const needsShift = form.permission !== "captain" && Boolean(form.agencyId);
+  const officerOptions = roster.filter((o) =>
+    form.shiftId ? o.shiftId === form.shiftId : form.agencyId !== "" && o.agencyId === form.agencyId,
+  );
+  const linked = roster.find((o) => o.id === form.officerId) ?? null;
+  const roleChoices = PERMISSIONS.filter((p) => allowed.includes(p) || p === person.permission);
+
+  const save = useMutation({
+    mutationFn: () => {
+      const data: Parameters<typeof updateStaffUser>[0]["data"] = { userId: person.userId };
+      if (form.name !== initial.name) data.name = form.name;
+      if (form.email !== initial.email) data.email = form.email;
+      if (form.rank !== initial.rank) data.rank = (form.rank || null) as typeof data.rank;
+      if (!self) {
+        if (form.permission !== initial.permission) data.permission = form.permission;
+        if (isOwner && form.agencyId !== initial.agencyId) data.agencyId = form.agencyId || null;
+        if (form.shiftId !== initial.shiftId || data.agencyId !== undefined) {
+          data.shiftId = needsShift ? form.shiftId || null : null;
+        }
+        if (form.officerId !== initial.officerId) data.officerId = form.officerId || null;
+        if (form.disabled !== initial.disabled) data.disabled = form.disabled;
+      }
+      return updateStaffUser({ data });
+    },
+    onSuccess: async (res) => {
+      setError(null);
+      toast.success(res.changed.length ? `${form.name} saved` : "Nothing changed");
+      if (res.note) toast.message(res.note);
+      await onDone(true);
+    },
+    onError: (err) => setError(err.message),
+  });
+
+  return (
+    <form
+      className="space-y-3 rounded-md border border-border bg-card-2 p-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        save.mutate();
+      }}
+    >
+      <p className="text-2xs uppercase tracking-wide text-muted">Edit details</p>
+      <div className="space-y-1">
+        <Label htmlFor="edit-name">Name</Label>
+        <Input
+          id="edit-name"
+          value={form.name}
+          onChange={(e) => set("name", e.target.value)}
+          maxLength={80}
+          required
+        />
+      </div>
+      <div className="space-y-1">
+        <Label htmlFor="edit-email">Email</Label>
+        <Input
+          id="edit-email"
+          type="email"
+          value={form.email}
+          onChange={(e) => set("email", e.target.value.trim().toLowerCase())}
+          required
+        />
+      </div>
+      <div className="space-y-1">
+        <Label htmlFor="edit-rank">Rank</Label>
+        <select
+          id="edit-rank"
+          className={SELECT_CLASS}
+          value={linked && form.officerId !== initial.officerId && form.rank === initial.rank ? linked.role : form.rank}
+          onChange={(e) => set("rank", e.target.value)}
+        >
+          <option value="">None</option>
+          {ROLES.map((r) => (
+            <option key={r.id} value={r.id}>
+              {r.label}
+            </option>
+          ))}
+        </select>
+        {form.officerId ? (
+          <p className="text-2xs text-muted">
+            Linked to the roster: rank is saved on the roster officer. Rank never changes permissions.
+          </p>
+        ) : null}
+      </div>
+      {!self ? (
+        <>
+          <div className="space-y-1">
+            <Label htmlFor="edit-permission">Permission</Label>
+            <select
+              id="edit-permission"
+              className={SELECT_CLASS}
+              value={form.permission}
+              onChange={(e) => set("permission", e.target.value as Permission)}
+            >
+              {roleChoices.map((p) => (
+                <option key={p} value={p} disabled={!allowed.includes(p)}>
+                  {permissionLabel(p)}
+                </option>
+              ))}
+            </select>
+          </div>
+          {isOwner && placement ? (
+            <div className="space-y-1">
+              <Label htmlFor="edit-agency">Agency</Label>
+              <select
+                id="edit-agency"
+                className={SELECT_CLASS}
+                value={form.agencyId}
+                onChange={(e) =>
+                  // A new agency clears shift and roster link unless new ones are chosen.
+                  setForm((f) => ({ ...f, agencyId: e.target.value, shiftId: "", officerId: "" }))
+                }
+              >
+                <option value="">Unassigned</option>
+                {placement.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
+          {needsShift ? (
+            <div className="space-y-1">
+              <Label htmlFor="edit-shift">Shift</Label>
+              <select
+                id="edit-shift"
+                className={SELECT_CLASS}
+                value={form.shiftId}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    shiftId: e.target.value,
+                    officerId: roster.find((o) => o.id === f.officerId)?.shiftId === e.target.value ? f.officerId : "",
+                  }))
+                }
+                required
+              >
+                <option value="">Pick a shift…</option>
+                {shiftOptions.map((sh) => (
+                  <option key={sh.id} value={sh.id}>
+                    {sh.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
+          {form.agencyId ? (
+            <div className="space-y-1">
+              <Label htmlFor="edit-officer">Roster officer</Label>
+              <select
+                id="edit-officer"
+                className={SELECT_CLASS}
+                value={form.officerId}
+                onChange={(e) => set("officerId", e.target.value)}
+              >
+                <option value="">Not linked</option>
+                {officerOptions.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
+          <div className="space-y-1">
+            <Label>Status</Label>
+            <div className="grid grid-cols-2 gap-2">
+              {(
+                [
+                  [false, "Active"],
+                  [true, "Disabled"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={label}
+                  type="button"
+                  className={cn(
+                    "rounded-md border px-2 py-2 text-2xs uppercase tracking-wide",
+                    form.disabled === value
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-border text-muted",
+                  )}
+                  onClick={() => set("disabled", value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {form.disabled && !initial.disabled ? (
+              <p className="text-2xs text-muted">Signs them out now and blocks sign-in until re-enabled.</p>
+            ) : null}
+          </div>
+        </>
+      ) : null}
+      {error ? <p className="text-sm text-destructive">{error}</p> : null}
+      <div className="flex gap-2">
+        <Button type="submit" disabled={save.isPending}>
+          {save.isPending ? "Saving…" : "Save"}
+        </Button>
+        <Button type="button" variant="ghost" onClick={() => void onDone(false)}>
+          Cancel
+        </Button>
+      </div>
+    </form>
   );
 }
 

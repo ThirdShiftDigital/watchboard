@@ -360,3 +360,60 @@ export function requestForBlock(input: {
   }
   return null;
 }
+
+/** What an Edit user save changes (only the fields that differ from today). */
+export type EditUserChange = {
+  name?: boolean;
+  email?: boolean;
+  rank?: boolean;
+  permission?: Permission;
+  agency?: boolean;
+  shift?: boolean;
+  officer?: boolean;
+  /** New Disabled value. */
+  disabled?: boolean;
+};
+
+/**
+ * Why `actor` may not save `change` on `target` from the Edit user panel, or
+ * null when allowed (spec §1 "Who can use it").
+ * - Only the operator and division leaders / agency admins use the panel;
+ *   shift commanders keep their limited controls.
+ * - Your own login: name, email and rank only (no role, placement or Disabled).
+ * - Division leaders: logins in their agency only (staffManageBlock), never
+ *   another division leader's role, never a move to another agency.
+ * - The operator login can't be disabled.
+ */
+export function editUserBlock(
+  actor: StaffActor,
+  target: StaffTarget,
+  change: EditUserChange,
+): string | null {
+  if (!actor.isOwner && !actor.managePlatform && !actor.manageAgency) {
+    return "Only a division leader or the operator can edit login details.";
+  }
+  const self = actor.userId === target.userId;
+  if (self) {
+    if (change.disabled) return "You can’t disable your own login.";
+    if (change.permission !== undefined) return "You can’t change your own role.";
+    if (change.agency || change.shift || change.officer) {
+      return "You can’t move your own login here.";
+    }
+    return null;
+  }
+  const manageBlock = staffManageBlock(actor, target);
+  if (manageBlock) return manageBlock;
+  if (target.isOwner && change.disabled) return "The operator login can’t be disabled.";
+  const platform = actor.isOwner || actor.managePlatform;
+  if (change.agency && !platform) return "Only the operator can move a login to another agency.";
+  if (change.permission !== undefined) {
+    const leader = target.agencyAdmin || target.permission === "captain";
+    if (leader && !platform) return "Only the operator can change a division leader’s role.";
+    if (change.permission === "captain" && !platform && !actor.manageAgency) {
+      return "Only a division leader can give that role.";
+    }
+    const roleBlock = roleAssignBlock(actor, change.permission);
+    if (roleBlock) return roleBlock;
+  }
+  return null;
+}

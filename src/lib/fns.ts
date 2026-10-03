@@ -107,7 +107,7 @@ function mapRequest(row: RequestRow): TimeOffRequest {
   };
 }
 
-async function loadOfficers(shiftId: string) {
+export async function loadOfficers(shiftId: string) {
   if (!shiftId) return [];
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();

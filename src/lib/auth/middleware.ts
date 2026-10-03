@@ -43,5 +43,8 @@ export const authMiddleware = createMiddleware({ type: "function" })
     // Reject scripted cross-site/sibling requests before touching per-user data.
     assertSameSiteRequest();
     const userId = await requireUserId(context.bearerToken);
+    // Disabled logins: refused even while a cached session cookie is still valid.
+    const { DisabledLoginError, isLoginDisabled } = await import("./disabled.server");
+    if (await isLoginDisabled(userId)) throw new DisabledLoginError();
     return next({ context: { userId } });
   });
