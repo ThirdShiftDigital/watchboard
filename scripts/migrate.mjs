@@ -18,6 +18,17 @@ import { dirname, join } from "node:path";
 import pg from "pg";
 import { pendingMigrations } from "./migration-plan.mjs";
 
+// Netlify sets CONTEXT on every build (production, deploy-preview, branch-deploy, dev).
+// Deploy previews and branch deploys share the production DATABASE_URL, so only the
+// production build may change the schema. Unreviewed PRs must never migrate prod.
+const buildContext = process.env.CONTEXT;
+if (buildContext && buildContext !== "production") {
+  console.log(
+    `[migrate] Netlify context "${buildContext}" is not production — skipping migrations.`,
+  );
+  process.exit(0);
+}
+
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
   console.log(
