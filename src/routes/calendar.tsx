@@ -9,6 +9,7 @@ import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { CalendarBanner } from "@/components/calendar-banner";
 import { CalendarFeedPanel } from "@/components/calendar-feed-sheet";
 import { RequestForm } from "@/components/request-form";
+import { DenyDialog } from "@/components/deny-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -48,6 +49,7 @@ function CalendarPage() {
   const queryClient = useQueryClient();
   const [requesting, setRequesting] = useState(false);
   const [callIn, setCallIn] = useState(false);
+  const [removing, setRemoving] = useState<{ id: number; name: string } | null>(null);
   const [feedOpen, setFeedOpen] = useState(false);
   const monthStart = startOfMonth(date);
   const monthDays = daysInMonth(date);
@@ -101,9 +103,11 @@ function CalendarPage() {
 
   const dayEvents = events.filter((e) => eventTouchesDate(e.start, e.end, date));
 
-  async function removeLeave(id: number, name: string) {
+  async function removeLeave(id: number, name: string, denialReason: string) {
     try {
-      const result = await setRequestStatus({ data: { id, status: "denied" } });
+      const result = await setRequestStatus({
+        data: { id, status: "denied", ...(denialReason ? { denialReason } : {}) },
+      });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["calendar"] }),
         queryClient.invalidateQueries({ queryKey: ["requests"] }),
@@ -356,7 +360,7 @@ function CalendarPage() {
                     <Button
                       size="sm"
                       variant="secondary"
-                      onClick={() => void removeLeave(chip.id, chip.name)}
+                      onClick={() => setRemoving({ id: chip.id, name: chip.name })}
                     >
                       Remove
                     </Button>
@@ -411,7 +415,7 @@ function CalendarPage() {
                     <Button
                       size="sm"
                       variant="ghost"
-                      onClick={() => void removeLeave(r.id, r.name)}
+                      onClick={() => setRemoving({ id: r.id, name: r.name })}
                     >
                       Remove
                     </Button>
@@ -423,6 +427,18 @@ function CalendarPage() {
         ) : null}
       </section>
 
+      {removing ? (
+        <DenyDialog
+          title="Remove leave"
+          subtitle={`${removing.name} · removes it from the calendar and marks it denied`}
+          confirmLabel="Remove"
+          onCancel={() => setRemoving(null)}
+          onConfirm={async (reason) => {
+            await removeLeave(removing.id, removing.name, reason);
+            setRemoving(null);
+          }}
+        />
+      ) : null}
       {callIn ? (
         <RequestForm
           mode="call-in"

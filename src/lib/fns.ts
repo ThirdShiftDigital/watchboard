@@ -16,6 +16,7 @@ import { buildRows, deriveLastName, leaveEventDescription, leaveEventSummary, st
 import { applySeniority, normalizeZoneOrder, sortRoster } from "@/lib/types";
 import { requestForBlock } from "@/lib/access";
 import { isMissingTable, loadOverrides } from "@/lib/overrides-db";
+import { cleanDenialReason, decisionBlock, visibleDenialReason } from "@/lib/request-decision";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { requireCap, accessFor, officerPlacement } from "@/lib/staff";
 import { activeShiftIdFor, currentShiftFor, ensureShifts, loadShift, requireCurrentShift } from "@/lib/shifts";
@@ -64,6 +65,8 @@ type RequestRow = {
   created_at: string;
   calendar_event_id?: string | null;
   calendar_label?: string | null;
+  denial_reason?: string | null;
+  decided_at?: string | null;
 };
 
 function mapOfficer(row: OfficerRow): Officer {
@@ -105,6 +108,8 @@ function mapRequest(row: RequestRow): TimeOffRequest {
         ? row.created_at
         : new Date(row.created_at).toISOString(),
     calendarEventId: row.calendar_event_id ?? null,
+    denialReason: visibleDenialReason(row.status, row.denial_reason),
+    decidedAt: row.decided_at ?? null,
   };
 }
 
@@ -128,7 +133,8 @@ async function loadRequests(shiftId: string) {
   const rows = await sql<RequestRow>`
     select r.id, r.officer_id, r.start_date, r.end_date, r.kind, r.reason, r.status,
            to_char(r.created_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as created_at,
-           r.calendar_event_id
+           r.calendar_event_id, r.denial_reason,
+           to_char(r.decided_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as decided_at
     from time_off_requests r
     join officers o on o.id = r.officer_id
     where o.shift_id = ${shiftId}
@@ -386,7 +392,9 @@ function hideOthersReasons(
   access: { caps: { approveRequests: boolean }; officerId: string | null },
 ): TimeOffRequest[] {
   if (access.caps.approveRequests) return requests;
-  return requests.map((r) => (r.officerId === access.officerId ? r : { ...r, reason: "" }));
+  return requests.map((r) =>
+    r.officerId === access.officerId ? r : { ...r, reason: "", denialReason: null },
+  );
 }
 
 export const listRequests = createServerFn({ method: "GET" })
@@ -602,75 +610,104 @@ export const setRequestStatus = createServerFn({ method: "POST" })
     z.object({
       id: z.number().int(),
       status: z.enum(["approved", "denied", "pending"]),
+      /** Deny only; trimmed to 300 characters server-side. */
+      denialReason: z.string().max(2000).optional(),
     }),
   )
-  .handler(async ({ data, context }) => {
-    await requireCap(context.userId, "approveRequests");
-    const { getSql } = await import("@/lib/db");
-    const sql = await getSql();
-    const existing = await sql<RequestRow>`
-      select id, officer_id, start_date, end_date, kind, reason, status, created_at::text as created_at, calendar_event_id, calendar_label
-      from time_off_requests
-      where id = ${data.id}
-      limit 1
-    `;
-    const row = existing[0];
-    if (!row) throw new Error("Request not found.");
-    // Use the requesting officer's shift (its Google connection + calendar),
-    // not whatever shift the approver happens to have active.
-    const ownerShift = await sql<{ shift_id: string | null }>`
-      select shift_id from officers where id = ${row.officer_id} limit 1
-    `;
-    const shift =
-      (ownerShift[0]?.shift_id ? await loadShift(ownerShift[0].shift_id) : null) ??
-      (await currentShiftFor(context.userId));
-    const officers = await loadOfficers(shift.id);
-    const officer = officers.find((o) => o.id === row.officer_id);
+  .handler(({ data, context }) => setRequestStatusFor(context.userId, data));
+
+/** Approve / deny / restore core (also used by the integration tests). */
+export async function setRequestStatusFor(
+  userId: string,
+  data: { id: number; status: "approved" | "denied" | "pending"; denialReason?: string },
+) {
+  const access = await requireCap(userId, "approveRequests");
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const existing = await sql<RequestRow>`
+    select id, officer_id, start_date, end_date, kind, reason, status, created_at::text as created_at, calendar_event_id, calendar_label
+    from time_off_requests
+    where id = ${data.id}
+    limit 1
+  `;
+  const row = existing[0];
+  if (!row) throw new Error("Request not found.");
+  // Only approvers within their scope (own shift; division leaders: agency).
+  const block = decisionBlock({
+    caps: access.caps,
+    officer: await officerPlacement(row.officer_id),
+    actorAgencyId: access.agencyId,
+    actorShiftId: (await activeShiftIdFor(userId)) || null,
+  });
+  if (block) throw new Error(block);
+  // Use the requesting officer's shift (its Google connection + calendar),
+  // not whatever shift the approver happens to have active.
+  const ownerShift = await sql<{ shift_id: string | null }>`
+    select shift_id from officers where id = ${row.officer_id} limit 1
+  `;
+  const shift =
+    (ownerShift[0]?.shift_id ? await loadShift(ownerShift[0].shift_id) : null) ??
+    (await currentShiftFor(userId));
+  const officers = await loadOfficers(shift.id);
+  const officer = officers.find((o) => o.id === row.officer_id);
+  // Deny with an optional note for the officer. Approve / Restore keep any old
+  // note as history; it is only shown while the request is denied.
+  if (data.status === "denied") {
     await sql`
-      update time_off_requests set status = ${data.status} where id = ${data.id}
+      update time_off_requests
+      set status = 'denied', denial_reason = ${cleanDenialReason(data.denialReason)},
+          decided_by = ${userId}, decided_at = now()
+      where id = ${data.id}
     `;
-    let calendar: CalendarOutcome = { written: false, message: null, reason: null };
-    if (data.status === "approved") {
-      await sql`
-        delete from zone_assignments
-        where officer_id = ${row.officer_id}
-          and date >= ${row.start_date}
-          and date <= ${row.end_date}
-      `;
-      if (row.calendar_event_id) {
-        // Already on Google Calendar — don't create a duplicate.
-        calendar = { written: true, message: null, reason: null };
-      } else {
-        const write = await writeApprovedLeave({
-          shiftId: shift.id,
-          googleCalendar: Boolean(shift.googleCalendar),
-          summary: officer
-            ? leaveEventSummary(officer, officers, row.kind, row.calendar_label)
-            : "LEAVE",
-          startDate: row.start_date,
-          endDate: row.end_date,
-          reason: leaveEventDescription(row.kind, row.reason),
-        }).catch((e: unknown) => ({
-          status: "failed" as const,
-          reason: "error" as const,
-          message: e instanceof Error ? e.message : "unexpected error writing to Google Calendar",
-        }));
-        calendar = calendarOutcome(write);
-        if (write.status === "written") {
-          await sql`update time_off_requests set calendar_event_id = ${write.eventId} where id = ${data.id}`;
-        }
-      }
-    } else if (row.calendar_event_id) {
-      const removed = await removeApprovedLeave(shift.id, row.calendar_event_id);
-      await sql`
-        update time_off_requests set calendar_event_id = null where id = ${data.id}
-      `;
-      if (!removed.ok) {
-        calendar = { written: false, message: removed.message, reason: "error" };
+  } else {
+    await sql`
+      update time_off_requests
+      set status = ${data.status}, decided_by = ${userId}, decided_at = now()
+      where id = ${data.id}
+    `;
+  }
+  let calendar: CalendarOutcome = { written: false, message: null, reason: null };
+  if (data.status === "approved") {
+    await sql`
+      delete from zone_assignments
+      where officer_id = ${row.officer_id}
+        and date >= ${row.start_date}
+        and date <= ${row.end_date}
+    `;
+    if (row.calendar_event_id) {
+      // Already on Google Calendar — don't create a duplicate.
+      calendar = { written: true, message: null, reason: null };
+    } else {
+      const write = await writeApprovedLeave({
+        shiftId: shift.id,
+        googleCalendar: Boolean(shift.googleCalendar),
+        summary: officer
+          ? leaveEventSummary(officer, officers, row.kind, row.calendar_label)
+          : "LEAVE",
+        startDate: row.start_date,
+        endDate: row.end_date,
+        reason: leaveEventDescription(row.kind, row.reason),
+      }).catch((e: unknown) => ({
+        status: "failed" as const,
+        reason: "error" as const,
+        message: e instanceof Error ? e.message : "unexpected error writing to Google Calendar",
+      }));
+      calendar = calendarOutcome(write);
+      if (write.status === "written") {
+        await sql`update time_off_requests set calendar_event_id = ${write.eventId} where id = ${data.id}`;
       }
     }
-    return { ok: true, startDate: row.start_date, endDate: row.end_date, calendar };
-  });
+  } else if (row.calendar_event_id) {
+    const removed = await removeApprovedLeave(shift.id, row.calendar_event_id);
+    await sql`
+      update time_off_requests set calendar_event_id = null where id = ${data.id}
+    `;
+    if (!removed.ok) {
+      calendar = { written: false, message: removed.message, reason: "error" };
+    }
+  }
+  return { ok: true, startDate: row.start_date, endDate: row.end_date, calendar };
+}
 
 /** Retry writing an approved request to Google Calendar (no roster changes). */
 export const retryLeaveCalendar = createServerFn({ method: "POST" })

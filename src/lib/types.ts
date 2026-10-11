@@ -128,6 +128,10 @@ export type TimeOffRequest = {
   status: RequestStatus;
   createdAt: string;
   calendarEventId?: string | null;
+  /** Supervisor's note, present only while status is "denied". */
+  denialReason?: string | null;
+  /** Last approve / deny / restore (ISO, UTC); null for older requests. */
+  decidedAt?: string | null;
 };
 
 /** Per-date exception to the standing RDO pattern (migrations/0014_duty_overrides.sql). */

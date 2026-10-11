@@ -5,6 +5,7 @@ import { type ReactNode, useState } from "react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
 import { RequestForm } from "@/components/request-form";
+import { DenyDialog } from "@/components/deny-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,6 +36,7 @@ function RequestsPage() {
   const [nameFilter, setNameFilter] = useState("");
   const [dateFilter, setDateFilter] = useState("");
   const [when, setWhen] = useState<"all" | "upcoming" | "past">("all");
+  const [denying, setDenying] = useState<{ req: TimeOffRequest; remove: boolean } | null>(null);
 
   const q = useQuery({
     queryKey: ["requests"],
@@ -43,8 +45,11 @@ function RequestsPage() {
   });
 
   const setStatus = useMutation({
-    mutationFn: (input: { id: number; status: "approved" | "denied" | "pending" }) =>
-      setRequestStatus({ data: input }),
+    mutationFn: (input: {
+      id: number;
+      status: "approved" | "denied" | "pending";
+      denialReason?: string;
+    }) => setRequestStatus({ data: input }),
     onSuccess: async (data, vars) => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["requests"] }),
@@ -69,7 +74,7 @@ function RequestsPage() {
             duration: 12_000,
           });
         } else {
-          toast.success("Removed from the calendar");
+          toast.success(vars.denialReason ? "Denied — reason sent to the officer" : "Denied");
         }
       }
     },
@@ -152,7 +157,7 @@ function RequestsPage() {
       <Button
         size="sm"
         variant="secondary"
-        onClick={() => setStatus.mutate({ id: req.id, status: "denied" })}
+        onClick={() => setDenying({ req, remove: true })}
       >
         Remove from calendar
       </Button>
@@ -258,7 +263,7 @@ function RequestsPage() {
                       <Button
                         size="sm"
                         variant="secondary"
-                        onClick={() => setStatus.mutate({ id: req.id, status: "denied" })}
+                        onClick={() => setDenying({ req, remove: false })}
                       >
                         Deny
                       </Button>
@@ -379,6 +384,26 @@ function RequestsPage() {
         </Section>
       ) : null}
 
+      {denying ? (
+        <DenyDialog
+          title={denying.remove ? "Remove from calendar" : "Deny request"}
+          subtitle={`${nameOf(denying.req.officerId)} · ${
+            denying.req.startDate === denying.req.endDate
+              ? formatShort(denying.req.startDate)
+              : `${formatShort(denying.req.startDate)} – ${formatShort(denying.req.endDate)}`
+          } · ${kindLabel(denying.req.kind)}`}
+          confirmLabel={denying.remove ? "Remove" : "Deny"}
+          onCancel={() => setDenying(null)}
+          onConfirm={async (denialReason) => {
+            await setStatus.mutateAsync({
+              id: denying.req.id,
+              status: "denied",
+              ...(denialReason ? { denialReason } : {}),
+            }).catch(() => undefined);
+            setDenying(null);
+          }}
+        />
+      ) : null}
       {open ? (
         <RequestForm
           officers={officers}
@@ -435,6 +460,9 @@ function RequestCard({
             <p className="mt-1 text-xs text-subtle">Submitted {formatStamp(req.createdAt)}</p>
           ) : null}
           {req.reason ? <p className="mt-1 text-sm text-subtle">{req.reason}</p> : null}
+          {req.status === "denied" && req.denialReason ? (
+            <p className="mt-1 text-sm text-destructive">Denied: {req.denialReason}</p>
+          ) : null}
         </div>
         <Badge tone={statusTone(req.status)}>{statusLabel(req.status)}</Badge>
       </div>

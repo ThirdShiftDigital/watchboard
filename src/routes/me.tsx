@@ -308,6 +308,11 @@ function OfficerPage() {
                           {r.endDate !== r.startDate ? ` – ${formatShort(r.endDate)}` : ""}
                           {r.createdAt ? ` · ${formatStamp(r.createdAt)}` : ""}
                         </span>
+                        {r.status === "denied" && r.denialReason ? (
+                          <span className="mt-1 block text-xs text-destructive">
+                            Denied: {r.denialReason}
+                          </span>
+                        ) : null}
                       </span>
                       <span className="flex shrink-0 items-center gap-2">
                         <Badge tone={statusTone(r.status)}>{statusLabel(r.status)}</Badge>
