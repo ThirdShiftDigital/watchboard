@@ -8,6 +8,7 @@ import { PublicHomePage } from "@/components/public-home";
 import { CalendarBanner } from "@/components/calendar-banner";
 import { DateBar } from "@/components/date-bar";
 import { SendSheet } from "@/components/send-sheet";
+import { OverrideSheet } from "@/components/override-sheet";
 import { ZoneForm } from "@/components/zone-form";
 import { ZoneOrderSheet } from "@/components/zone-order-sheet";
 import { Badge } from "@/components/ui/badge";
@@ -24,7 +25,7 @@ import {
 import { useMyAccess, usePendingCount, useSupervisorReady } from "@/lib/hooks";
 import { useWatchDate } from "@/lib/store";
 import { DEFAULT_ZONE_ORDER, zoneHint } from "@/lib/types";
-import type { Officer, WatchBoard, WatchRow } from "@/lib/types";
+import type { DutyOverride, Officer, WatchBoard, WatchRow } from "@/lib/types";
 import { sortWatchRows } from "@/lib/watch-text";
 
 export const Route = createFileRoute("/")({
@@ -54,6 +55,8 @@ function ZonesPage() {
   const { ready } = useSupervisorReady();
   const access = useMyAccess();
   const canEdit = Boolean(access.data?.caps.editWatch);
+  const canOverride = Boolean(access.data?.caps.overtimeSwaps);
+  const [duty, setDuty] = useState<{ officer: Officer; existing?: DutyOverride } | null>(null);
   const pendingCount = usePendingCount();
   const queryClient = useQueryClient();
   const [showOffDuty, setShowOffDuty] = useState(false);
@@ -185,6 +188,23 @@ function ZonesPage() {
     : undefined;
   const rosterEmpty = Boolean(data && data.officers.length === 0);
 
+  /** Overtime & swaps from the board: put an RDO officer on duty, or undo an entry. */
+  function dutyAction(row: WatchRow): { label: string; onClick: () => void } | undefined {
+    if (!canOverride || !data) return undefined;
+    if (row.override) {
+      const existing = data.overrides?.find((o) => o.officerId === row.officer.id && o.date === date);
+      if (!existing) return undefined;
+      return {
+        label: row.override === "ot" ? "Overtime · change" : "Swap · change",
+        onClick: () => setDuty({ officer: row.officer, existing }),
+      };
+    }
+    if (row.status === "rdo") {
+      return { label: "Put on duty", onClick: () => setDuty({ officer: row.officer }) };
+    }
+    return undefined;
+  }
+
   return (
     <AppShell
       title="Zones"
@@ -302,6 +322,7 @@ function ZonesPage() {
                 ? () => setForm({ officer: row.officer, zone: row.zone ?? undefined })
                 : undefined
             }
+            action={dutyAction(row)}
           />
         ))}
       </ul>
@@ -324,6 +345,25 @@ function ZonesPage() {
           onCancel={() => setForm(null)}
           onSave={(officerId, zone) => save.mutate({ officerId, zone })}
           onRemove={form.officer ? () => remove.mutate(form.officer!.id) : undefined}
+        />
+      ) : null}
+      {duty && data ? (
+        <OverrideSheet
+          officer={duty.officer}
+          date={date}
+          officers={data.officers}
+          existing={duty.existing}
+          canOverride={canOverride}
+          onClose={() => setDuty(null)}
+          onDone={async (message) => {
+            setDuty(null);
+            toast.success(message);
+            await Promise.all([
+              queryClient.invalidateQueries({ queryKey: ["watch"] }),
+              queryClient.invalidateQueries({ queryKey: ["schedule"] }),
+              queryClient.invalidateQueries({ queryKey: ["swaps"] }),
+            ]);
+          }}
         />
       ) : null}
       {sending && data ? (
@@ -350,9 +390,11 @@ function ZonesPage() {
 function ZoneRow({
   row,
   onOpen,
+  action,
 }: {
   row: WatchRow;
   onOpen?: () => void;
+  action?: { label: string; onClick: () => void };
 }) {
   const off = row.status !== "working";
   const hint = row.zone ? zoneHint(row.zone) : "";
@@ -370,6 +412,8 @@ function ZoneRow({
             {row.officer.tmt ? <Badge tone="warning">SRT</Badge> : null}
             {off ? (
               <Badge tone={row.status === "rdo" ? "rdo" : "danger"}>{row.statusLabel}</Badge>
+            ) : row.override ? (
+              <Badge tone="primary">{row.statusLabel}</Badge>
             ) : null}
             {row.eventTitle ? (
               <span className="truncate text-2xs text-muted">{row.eventTitle}</span>
@@ -393,6 +437,17 @@ function ZoneRow({
           {onOpen ? <ChevronRight className="size-4 shrink-0 text-subtle" /> : null}
         </span>
       </button>
+      {action ? (
+        <div className="-mt-2 px-4 pb-3">
+          <button
+            type="button"
+            onClick={action.onClick}
+            className="text-2xs uppercase tracking-label text-primary"
+          >
+            {action.label}
+          </button>
+        </div>
+      ) : null}
     </li>
   );
 }

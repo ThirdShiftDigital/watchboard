@@ -1,25 +1,32 @@
-import { eventTouchesDate } from "./dates";
+import { eventTouchesDate } from "./dates.ts";
 import type {
   CalendarEvent,
+  DutyOverride,
   DutyStatus,
+  OverrideKind,
   Officer,
   TimeOffRequest,
   WatchRow,
   ZoneAssignment,
   RequestKind,
-} from "./types";
-import { kindShort, REQUEST_KINDS } from "./types";
+} from "./types.ts";
+import { kindShort, overrideLabel, REQUEST_KINDS } from "./types.ts";
 
+/**
+ * Who is on or off on `date`. Overtime / swap entries (`overrides`) sit between
+ * approved leave and the standing pattern:
+ *   approved leave > swap (off) > OT / swap (working) > RDO > CAL > ON.
+ * With no override the original order is unchanged (RDO, then leave, then CAL).
+ * Pass no overrides for the standing-pattern views ("RDOs only", RDO PDF).
+ */
 export function statusForOfficer(
   officer: Officer,
   weekday: number,
   date: string,
   requests: TimeOffRequest[],
   events: CalendarEvent[],
-): { status: DutyStatus; statusLabel: string; eventTitle?: string } {
-  if (officer.rdoDays.includes(weekday)) {
-    return { status: "rdo", statusLabel: "RDO" };
-  }
+  overrides: DutyOverride[] = [],
+): { status: DutyStatus; statusLabel: string; eventTitle?: string; override?: OverrideKind } {
   const leave = requests.find(
     (r) =>
       r.status === "approved" &&
@@ -27,6 +34,17 @@ export function statusForOfficer(
       date >= r.startDate &&
       date <= r.endDate,
   );
+  const ov = overrides.find((o) => o.officerId === officer.id && o.date === date);
+  if (ov) {
+    if (leave) return { status: "leave", statusLabel: kindShort(leave.kind) };
+    if (ov.status === "off") {
+      return { status: "leave", statusLabel: overrideLabel(ov.kind), override: ov.kind };
+    }
+    return { status: "working", statusLabel: overrideLabel(ov.kind), override: ov.kind };
+  }
+  if (officer.rdoDays.includes(weekday)) {
+    return { status: "rdo", statusLabel: "RDO" };
+  }
   if (leave) {
     return { status: "leave", statusLabel: kindShort(leave.kind) };
   }
@@ -52,16 +70,18 @@ export function buildRows(
   requests: TimeOffRequest[],
   events: CalendarEvent[],
   assignments: ZoneAssignment[],
+  overrides: DutyOverride[] = [],
 ): WatchRow[] {
   const zoneByOfficer = new Map(assignments.map((a) => [a.officerId, a.zone]));
   return officers.map((officer) => {
-    const s = statusForOfficer(officer, weekday, date, requests, events);
+    const s = statusForOfficer(officer, weekday, date, requests, events, overrides);
     return {
       officer,
       status: s.status,
       statusLabel: s.statusLabel,
       zone: s.status === "working" ? (zoneByOfficer.get(officer.id) ?? null) : null,
       eventTitle: s.eventTitle,
+      ...(s.override ? { override: s.override } : {}),
     };
   });
 }
@@ -199,11 +219,12 @@ export function staffingByWeekday(
   events: CalendarEvent[],
   weekStart: string,
   addDaysFn: (iso: string, n: number) => string,
+  overrides: DutyOverride[] = [],
 ): number[] {
   return Array.from({ length: 7 }, (_, weekday) => {
     const date = addDaysFn(weekStart, weekday);
     return officers.filter((o) => {
-      const s = statusForOfficer(o, weekday, date, requests, events);
+      const s = statusForOfficer(o, weekday, date, requests, events, overrides);
       return s.status === "working";
     }).length;
   });

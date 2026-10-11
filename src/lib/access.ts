@@ -13,6 +13,7 @@ export const TOGGLE_CAPS = [
   "manageRoster",
   "approveRequests",
   "callIn",
+  "overtimeSwaps",
   "viewCalendar",
   "viewShiftRequests",
   "submitRequests",
@@ -35,6 +36,11 @@ export const CAP_INFO: Record<ToggleCap, { label: string; hint: string; requires
     requires: "viewBoard",
   },
   callIn: { label: "Call-in leave", hint: "Put someone on leave right away from Calendar", requires: "viewCalendar" },
+  overtimeSwaps: {
+    label: "Overtime & swaps",
+    hint: "Put someone on duty on an RDO (overtime) or swap two officers' days",
+    requires: "viewBoard",
+  },
   viewCalendar: { label: "Shift calendar", hint: "Calendar page and the leave calendar on Officer" },
   viewShiftRequests: {
     label: "See who’s off",
@@ -99,6 +105,7 @@ export type Caps = {
   manageRoster: boolean;
   approveRequests: boolean;
   callIn: boolean;
+  overtimeSwaps: boolean;
   viewShiftRequests: boolean;
   submitRequests: boolean;
   sendList: boolean;
@@ -131,6 +138,7 @@ export function defaultCapsFor(permission: Permission, extras?: CapExtras): Caps
     manageRoster: supervisor,
     approveRequests: supervisor,
     callIn: supervisor,
+    overtimeSwaps: supervisor,
     viewShiftRequests: !dispatchOnly,
     submitRequests: true,
     sendList: dispatcher,
@@ -148,6 +156,7 @@ export const NO_CAPS: Caps = {
   manageRoster: false,
   approveRequests: false,
   callIn: false,
+  overtimeSwaps: false,
   viewShiftRequests: false,
   submitRequests: false,
   sendList: false,
