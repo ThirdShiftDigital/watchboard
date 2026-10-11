@@ -130,6 +130,26 @@ export type TimeOffRequest = {
   calendarEventId?: string | null;
 };
 
+/** Per-date exception to the standing RDO pattern (migrations/0014_duty_overrides.sql). */
+export type OverrideKind = "ot" | "swap";
+export type DutyOverride = {
+  id: number;
+  officerId: string;
+  /** Shift start date (YYYY-MM-DD, Central). */
+  date: string;
+  /** working = on duty that date; off = the partner's side of a swap. */
+  status: "working" | "off";
+  kind: OverrideKind;
+  partnerOfficerId: string | null;
+  swapGroup: string | null;
+  isPayback: boolean;
+  reason: string;
+};
+
+export function overrideLabel(kind: OverrideKind): string {
+  return kind === "ot" ? "OT" : "SWAP";
+}
+
 export type CalendarEvent = {
   id: string;
   title: string;
@@ -165,6 +185,8 @@ export type WatchRow = {
   statusLabel: string;
   zone: string | null;
   eventTitle?: string;
+  /** Set when an Overtime / Swap entry decides this row (badge OT / SWAP). */
+  override?: OverrideKind;
 };
 
 export type WatchBoard = {
@@ -183,6 +205,8 @@ export type WatchBoard = {
   zoneOrder: string[];
   minWorking: number;
   shiftName?: string;
+  /** Overtime & swap entries on this date (DB only). */
+  overrides?: DutyOverride[];
 };
 
 export const DEFAULT_ZONE_ORDER: string[] = ZONES.map((z) => z.id);

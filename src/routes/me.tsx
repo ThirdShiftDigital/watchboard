@@ -55,16 +55,17 @@ function OfficerPage() {
   const requests = portalQuery.data?.requests ?? [];
   const watchRow = portalQuery.data?.todayRow ?? undefined;
   const events = portalQuery.data?.calendar?.events ?? [];
+  const overrides = portalQuery.data?.overrides ?? [];
   const locked = Boolean(linkedId);
 
   const week = useMemo(() => {
     if (!officer) return [];
     return WEEKDAY_SHORT.map((label, weekday) => {
       const iso = addDays(weekStart, weekday);
-      const s = statusForOfficer(officer, weekday, iso, requests, events);
+      const s = statusForOfficer(officer, weekday, iso, requests, events, overrides);
       return { label, iso, ...s };
     });
-  }, [officer, weekStart, requests, events]);
+  }, [officer, weekStart, requests, events, overrides]);
 
   const weekLeave = useMemo(() => {
     return events.filter((e) => eventOverlapsRange(e.start, e.end, weekStart, addDays(weekStart, 6)));
@@ -222,14 +223,15 @@ function OfficerPage() {
                         "flex flex-col items-center rounded-sm py-2",
                         isRdo && "bg-rdo text-rdo-fg",
                         isLeave && "bg-destructive/20 text-destructive",
-                        d.status === "working" && "bg-card-2 text-muted",
+                        d.status === "working" && !d.override && "bg-card-2 text-muted",
+                        d.status === "working" && d.override && "bg-primary/15 text-primary",
                         isToday && "ring-1 ring-primary/70",
                       )}
                     >
                       <span className="text-micro uppercase tracking-wide">{d.label}</span>
                       <span className="tabular text-sm font-medium">{Number(d.iso.slice(8))}</span>
                       <span className="mt-0.5 text-micro font-medium">
-                        {isRdo ? "RDO" : isLeave ? d.statusLabel : "ON"}
+                        {isRdo ? "RDO" : isLeave || d.override ? d.statusLabel : "ON"}
                       </span>
                     </div>
                   );

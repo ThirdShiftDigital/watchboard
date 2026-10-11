@@ -15,6 +15,7 @@ import type {
 import { buildRows, deriveLastName, leaveEventDescription, leaveEventSummary, statusForOfficer } from "@/lib/watch-logic";
 import { applySeniority, normalizeZoneOrder, sortRoster } from "@/lib/types";
 import { requestForBlock } from "@/lib/access";
+import { isMissingTable, loadOverrides } from "@/lib/overrides-db";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { requireCap, accessFor, officerPlacement } from "@/lib/staff";
 import { activeShiftIdFor, currentShiftFor, ensureShifts, loadShift, requireCurrentShift } from "@/lib/shifts";
@@ -184,11 +185,12 @@ export const getWatch = createServerFn({ method: "POST" })
     const shift = await currentShiftFor(context.userId);
     const date = data.date;
     const weekday = weekdayOf(date);
-    const [officers, requests, existing, access] = await Promise.all([
+    const [officers, requests, existing, access, overrides] = await Promise.all([
       loadOfficers(shift.id),
       loadRequests(shift.id),
       loadAssignments(date, shift.id),
       accessFor(context.userId),
+      loadOverrides(shift.id, date, date),
     ]);
     // Google shifts: calendar_cache only — Zones load and the post-Save refetch
     // must never wait on Google (token refresh / events.list). A stale cache is
@@ -197,7 +199,7 @@ export const getWatch = createServerFn({ method: "POST" })
       ? await readShiftCalendarCache({ shiftId: shift.id, officers, timeMin: date, timeMax: date })
       : await fetchCalendar(officers, date, date, shift, access.caps.editWatch);
     let assignments = existing;
-    let rows = buildRows(officers, weekday, date, requests, calendar.events, assignments);
+    let rows = buildRows(officers, weekday, date, requests, calendar.events, assignments, overrides);
     const statusById = new Map(rows.map((r) => [r.officer.id, r.status]));
     // Drop zones for officers who are off — but never on the strength of a
     // stale calendar cache alone (the event may already be gone in Google).
@@ -216,7 +218,7 @@ export const getWatch = createServerFn({ method: "POST" })
       `;
       const staleIds = new Set(stale.map((a) => a.officerId));
       assignments = assignments.filter((a) => !staleIds.has(a.officerId));
-      rows = buildRows(officers, weekday, date, requests, calendar.events, assignments);
+      rows = buildRows(officers, weekday, date, requests, calendar.events, assignments, overrides);
     }
     const workingCount = rows.filter((r) => r.status === "working").length;
     if (!access.caps.viewCalendar) {
@@ -240,6 +242,7 @@ export const getWatch = createServerFn({ method: "POST" })
       zoneOrder: shift.zoneOrder,
       minWorking: shift.minWorking,
       shiftName: shift.name,
+      overrides: access.caps.overtimeSwaps ? overrides : overrides.map((o) => ({ ...o, reason: "" })),
     };
   });
 
@@ -325,31 +328,38 @@ export const upsertAssignment = createServerFn({ method: "POST" })
       zone: z.string().min(1),
     }),
   )
-  .handler(async ({ data, context }) => {
-    await requireCap(context.userId, "editWatch");
-    const shift = await requireCurrentShift(context.userId);
-    // Duty gate from DB only — Save must not wait on Google/ICS.
-    const [officers, requests] = await Promise.all([
-      loadOfficers(shift.id),
-      loadRequests(shift.id),
-    ]);
-    const officer = officers.find((o) => o.id === data.officerId);
-    if (!officer) throw new Error("That officer is not on this shift’s schedule.");
-    const weekday = weekdayOf(data.date);
-    const events = await peekCalendarCache(shift.id, officers);
-    const duty = statusForOfficer(officer, weekday, data.date, requests, events);
-    if (duty.status !== "working") {
-      throw new Error("Zones only assign people working today on the schedule.");
-    }
-    const { getSql } = await import("@/lib/db");
-    const sql = await getSql();
-    await sql`
-      insert into zone_assignments (date, officer_id, zone)
-      values (${data.date}, ${data.officerId}, ${data.zone})
-      on conflict (date, officer_id) do update set zone = excluded.zone
-    `;
-    return { ok: true };
-  });
+  .handler(({ data, context }) => assignZoneFor(context.userId, data));
+
+/** Zone Save core (also used by the integration tests). DB only — never Google. */
+export async function assignZoneFor(
+  userId: string,
+  data: { date: string; officerId: string; zone: string },
+) {
+  await requireCap(userId, "editWatch");
+  const shift = await requireCurrentShift(userId);
+  // Duty gate from DB only — Save must not wait on Google/ICS.
+  const [officers, requests, overrides] = await Promise.all([
+    loadOfficers(shift.id),
+    loadRequests(shift.id),
+    loadOverrides(shift.id, data.date, data.date),
+  ]);
+  const officer = officers.find((o) => o.id === data.officerId);
+  if (!officer) throw new Error("That officer is not on this shift’s schedule.");
+  const weekday = weekdayOf(data.date);
+  const events = await peekCalendarCache(shift.id, officers);
+  const duty = statusForOfficer(officer, weekday, data.date, requests, events, overrides);
+  if (duty.status !== "working") {
+    throw new Error("Zones only assign people working today on the schedule.");
+  }
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  await sql`
+    insert into zone_assignments (date, officer_id, zone)
+    values (${data.date}, ${data.officerId}, ${data.zone})
+    on conflict (date, officer_id) do update set zone = excluded.zone
+  `;
+  return { ok: true };
+}
 
 export const deleteAssignment = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
@@ -453,6 +463,11 @@ export const getOfficerPortal = createServerFn({ method: "POST" })
     const requests = officer
       ? (await loadRequests(shift.id)).filter((r) => r.officerId === officer.id)
       : [];
+    const overrides = officer
+      ? (await loadOverrides(shift.id, weekStart, addDays(weekStart, 27))).filter(
+          (o) => o.officerId === officer.id,
+        )
+      : [];
     let todayRow = null;
     if (officer) {
       const assignments = await loadAssignments(today, shift.id);
@@ -464,6 +479,7 @@ export const getOfficerPortal = createServerFn({ method: "POST" })
         requests,
         calendar.events,
         mine,
+        overrides,
       );
       todayRow = rows[0] ?? null;
     }
@@ -477,6 +493,7 @@ export const getOfficerPortal = createServerFn({ method: "POST" })
       linked: Boolean(access.officerId),
       unassigned: false,
       calendar,
+      overrides,
     };
   });
 
@@ -961,6 +978,14 @@ export const deleteOfficer = createServerFn({ method: "POST" })
     const sql = await getSql();
     await sql`delete from zone_assignments where officer_id = ${data.id}`;
     await sql`delete from time_off_requests where officer_id = ${data.id}`;
+    // Their overtime entries and both sides of any swap they were in.
+    await sql`
+      delete from duty_overrides
+      where officer_id = ${data.id}
+         or swap_group in (select swap_group from duty_overrides where officer_id = ${data.id} and swap_group is not null)
+    `.catch((err: unknown) => {
+      if (!isMissingTable(err)) throw err;
+    });
     await sql`delete from officers where id = ${data.id}`;
     return { ok: true };
   });
@@ -973,11 +998,16 @@ export const getSchedule = createServerFn({ method: "POST" })
     const shift = await currentShiftFor(context.userId);
     const weekStart = startOfWeek(data.weekStart);
     const weekEnd = addDays(weekStart, 6);
-    const [officers, requests] = await Promise.all([
+    const [officers, requests, rawOverrides] = await Promise.all([
       loadOfficers(shift.id),
       loadRequests(shift.id),
+      loadOverrides(shift.id, weekStart, weekEnd),
     ]);
     const access = await accessFor(context.userId);
+    // Reasons on overtime / swaps are for the people who enter them.
+    const overrides = access.caps.overtimeSwaps
+      ? rawOverrides
+      : rawOverrides.map((o) => ({ ...o, reason: "" }));
     const fullCalendar = await fetchCalendar(officers, weekStart, weekEnd, shift, access.caps.editWatch);
     // Schedule editors need calendar leave for coverage; others need calendar access.
     const calendar =
@@ -990,6 +1020,7 @@ export const getSchedule = createServerFn({ method: "POST" })
       weekStart,
       officers,
       requests: hideOthersReasons(requests, access),
+      overrides,
       calendar,
       effectiveDate: shift.effectiveDate,
       minWorking: shift.minWorking,
@@ -1023,10 +1054,12 @@ export const getCalendarMonth = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const access = await requireCap(context.userId, "viewCalendar");
     const shift = await currentShiftFor(context.userId);
-    const [officers, allRequests] = await Promise.all([
+    const [officers, allRequests, rawOverrides] = await Promise.all([
       loadOfficers(shift.id),
       loadRequests(shift.id),
+      loadOverrides(shift.id, data.from, data.to),
     ]);
+    const overrides = rawOverrides.map((o) => ({ ...o, reason: "" }));
     const requests = access.caps.approveRequests
       ? allRequests
       : hideOthersReasons(
@@ -1034,7 +1067,7 @@ export const getCalendarMonth = createServerFn({ method: "POST" })
           access,
         );
     const calendar = await fetchCalendar(officers, data.from, data.to, shift, access.caps.editWatch);
-    return { officers, requests, calendar };
+    return { officers, requests, calendar, overrides };
   });
 
 export const getCalendarFeed = createServerFn({ method: "POST" })
@@ -1113,3 +1146,6 @@ export const disconnectGoogleCalendar = createServerFn({ method: "POST" })
     await disconnectShiftGoogle(shift.id);
     return { connected: false };
   });
+
+// Shared with overrides-fns.ts (Overtime & swaps) without changing these declarations.
+export { loadOfficers as loadShiftOfficers, loadRequests as loadShiftRequests };

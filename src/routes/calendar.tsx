@@ -76,6 +76,7 @@ function CalendarPage() {
   const officers = q.data?.officers ?? [];
   const requests = q.data?.requests ?? [];
   const events = q.data?.calendar.events ?? [];
+  const overrides = q.data?.overrides ?? [];
   const today = todayISO();
 
   const selectedLeave = useMemo(
@@ -92,11 +93,11 @@ function CalendarPage() {
     if (!officers.length) return null;
     const weekday = weekdayOf(date);
     const working = officers.filter(
-      (o) => statusForOfficer(o, weekday, date, requests, events).status === "working",
+      (o) => statusForOfficer(o, weekday, date, requests, events, overrides).status === "working",
     ).length;
     const off = officers.length - working;
     return { working, off };
-  }, [officers, date, requests, events]);
+  }, [officers, date, requests, events, overrides]);
 
   const dayEvents = events.filter((e) => eventTouchesDate(e.start, e.end, date));
 

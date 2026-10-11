@@ -10,9 +10,11 @@ import { CalendarBanner } from "@/components/calendar-banner";
 import { OfficerForm, type OfficerPayload } from "@/components/officer-form";
 import { RequestForm } from "@/components/request-form";
 import { ShiftHoursForm } from "@/components/shift-hours-form";
+import { OverrideSheet } from "@/components/override-sheet";
+import { SwapsFold } from "@/components/swaps-fold";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/cn";
-import { addDays, formatShort, startOfWeek, todayISO } from "@/lib/dates";
+import { addDays, formatShort, startOfWeek, todayISO, weekdayOf } from "@/lib/dates";
 import {
   createOfficer,
   deleteOfficer,
@@ -28,6 +30,7 @@ import {
   WEEKDAY_SHORT,
   rdoLabel,
   type CalendarEvent,
+  type DutyOverride,
   type Officer,
   type TimeOffRequest,
 } from "@/lib/types";
@@ -52,6 +55,8 @@ function SchedulePage() {
   const { ready } = useSupervisorReady();
   const access = useMyAccess();
   const canEdit = Boolean(access.data?.caps.manageRoster);
+  const canOverride = Boolean(access.data?.caps.overtimeSwaps);
+  const [sheet, setSheet] = useState<{ officer: Officer; date: string; existing?: DutyOverride } | null>(null);
   const queryClient = useQueryClient();
   const [form, setForm] = useState<"new" | Officer | null>(null);
   const [printOpen, setPrintOpen] = useState(false);
@@ -78,15 +83,36 @@ function SchedulePage() {
   const officers = data?.officers ?? [];
   const requests = data?.requests ?? [];
   const events = data?.calendar.events ?? [];
+  const overrides = data?.overrides ?? [];
   const minWorking = data?.minWorking ?? 10;
   // RDO-only: ignore approved leave + Google Calendar matches — standing RDO pattern only.
   const viewRequests = rdoOnly ? [] : requests;
   const viewEvents = rdoOnly ? [] : events;
+  // Overtime & swaps are per-date exceptions, not part of the standing pattern.
+  const viewOverrides = rdoOnly ? [] : overrides;
+
+  function onCell(officer: Officer, weekday: number, iso: string) {
+    const s = statusForOfficer(officer, weekday, iso, viewRequests, viewEvents, viewOverrides);
+    const ov = viewOverrides.find((o) => o.officerId === officer.id && o.date === iso);
+    if (s.override && ov) {
+      setSheet({ officer, date: iso, existing: ov });
+      return;
+    }
+    if (s.status === "leave" || s.status === "calendar") {
+      toast.message(`${officer.name} is off — ${s.statusLabel}`);
+      return;
+    }
+    if (s.status === "rdo" && canOverride && !rdoOnly) {
+      setSheet({ officer, date: iso });
+      return;
+    }
+    toggle.mutate({ officerId: officer.id, weekday });
+  }
 
   const counts = WEEKDAY_SHORT.map((_, weekday) => {
     const iso = addDays(weekStart, weekday);
     return officers.filter((o) => {
-      return statusForOfficer(o, weekday, iso, viewRequests, viewEvents).status === "working";
+      return statusForOfficer(o, weekday, iso, viewRequests, viewEvents, viewOverrides).status === "working";
     }).length;
   });
 
@@ -223,6 +249,11 @@ function SchedulePage() {
         <span className="inline-flex items-center gap-1.5">
           <span className="size-2.5 rounded-xs bg-card-2 ring-1 ring-border" /> On duty
         </span>
+        {!rdoOnly ? (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="size-2.5 rounded-xs bg-primary/30" /> OT / Swap
+          </span>
+        ) : null}
         <label className="inline-flex items-center gap-2 text-micro uppercase tracking-wide text-foreground">
           <input
             type="checkbox"
@@ -281,8 +312,9 @@ function SchedulePage() {
             today={today}
             requests={viewRequests}
             events={viewEvents}
+            overrides={viewOverrides}
             onEdit={() => setForm(officer)}
-            onToggle={(weekday) => toggle.mutate({ officerId: officer.id, weekday })}
+            onCell={(weekday, iso) => onCell(officer, weekday, iso)}
           />
         ))}
       </ul>
@@ -296,8 +328,9 @@ function SchedulePage() {
             today={today}
             requests={viewRequests}
             events={viewEvents}
+            overrides={viewOverrides}
             onEdit={() => setForm(officer)}
-            onToggle={(weekday) => toggle.mutate({ officerId: officer.id, weekday })}
+            onCell={(weekday, iso) => onCell(officer, weekday, iso)}
           />
         ))}
         <div className="sched-grid border-t border-border bg-header px-0 text-xs">
@@ -317,6 +350,34 @@ function SchedulePage() {
           ))}
         </div>
       </div>
+
+      {canOverride && data ? (
+        <SwapsFold onChanged={() => invalidateRoster(queryClient)} />
+      ) : null}
+
+      {sheet ? (
+        <OverrideSheet
+          officer={sheet.officer}
+          date={sheet.date}
+          officers={officers}
+          existing={sheet.existing}
+          canOverride={canOverride}
+          onChangeRdo={
+            canEdit && !sheet.existing
+              ? () => toggle.mutate({ officerId: sheet.officer.id, weekday: weekdayOf(sheet.date) })
+              : undefined
+          }
+          onClose={() => setSheet(null)}
+          onDone={async (message) => {
+            setSheet(null);
+            toast.success(message);
+            await Promise.all([
+              invalidateRoster(queryClient),
+              queryClient.invalidateQueries({ queryKey: ["swaps"] }),
+            ]);
+          }}
+        />
+      ) : null}
 
       {form ? (
         <OfficerForm
@@ -368,6 +429,7 @@ function SchedulePage() {
                 officers,
                 requests,
                 events,
+                overrides,
                 effectiveDate: data.effectiveDate,
                 rdoOnly,
                 showDates,
@@ -550,16 +612,18 @@ function OfficerCard({
   today,
   requests,
   events,
+  overrides,
   onEdit,
-  onToggle,
+  onCell,
 }: {
   officer: Officer;
   weekStart: string;
   today: string;
   requests: TimeOffRequest[];
   events: CalendarEvent[];
+  overrides: DutyOverride[];
   onEdit: () => void;
-  onToggle: (weekday: number) => void;
+  onCell: (weekday: number, iso: string) => void;
 }) {
   return (
     <li className="border-b border-border px-3 py-3">
@@ -584,7 +648,8 @@ function OfficerCard({
             today={today}
             requests={requests}
             events={events}
-            onToggle={onToggle}
+            overrides={overrides}
+            onCell={onCell}
           />
         ))}
       </div>
@@ -598,16 +663,18 @@ function OfficerRow({
   today,
   requests,
   events,
+  overrides,
   onEdit,
-  onToggle,
+  onCell,
 }: {
   officer: Officer;
   weekStart: string;
   today: string;
   requests: TimeOffRequest[];
   events: CalendarEvent[];
+  overrides: DutyOverride[];
   onEdit: () => void;
-  onToggle: (weekday: number) => void;
+  onCell: (weekday: number, iso: string) => void;
 }) {
   return (
     <div className="sched-grid border-b border-border">
@@ -635,7 +702,8 @@ function OfficerRow({
             today={today}
             requests={requests}
             events={events}
-            onToggle={onToggle}
+            overrides={overrides}
+            onCell={onCell}
           />
         </div>
       ))}
@@ -650,7 +718,8 @@ function DayCell({
   today,
   requests,
   events,
-  onToggle,
+  overrides,
+  onCell,
 }: {
   officer: Officer;
   weekday: number;
@@ -658,9 +727,10 @@ function DayCell({
   today: string;
   requests: TimeOffRequest[];
   events: CalendarEvent[];
-  onToggle: (weekday: number) => void;
+  overrides: DutyOverride[];
+  onCell: (weekday: number, iso: string) => void;
 }) {
-  const s = statusForOfficer(officer, weekday, iso, requests, events);
+  const s = statusForOfficer(officer, weekday, iso, requests, events, overrides);
   const isToday = iso === today;
   const isRdo = s.status === "rdo";
   const isLeave = s.status === "leave" || s.status === "calendar";
@@ -668,26 +738,21 @@ function DayCell({
     ? "RDO"
     : s.status === "calendar"
       ? "CAL"
-      : s.status === "leave"
+      : s.status === "leave" || s.override
         ? s.statusLabel
         : "ON";
 
   return (
     <button
       type="button"
-      onClick={() => {
-        if (isLeave) {
-          toast.message(`${officer.name} is off — ${s.statusLabel}`);
-          return;
-        }
-        onToggle(weekday);
-      }}
+      onClick={() => onCell(weekday, iso)}
       aria-label={`${officer.name} ${WEEKDAY_SHORT[weekday]} ${label}`}
       className={cn(
         "flex h-12 w-full flex-col items-center justify-center rounded-sm text-2xs font-medium tracking-wide",
         isRdo && "bg-rdo text-rdo-fg",
         isLeave && "bg-destructive/20 text-destructive",
-        s.status === "working" && "bg-card-2 text-muted hover:text-foreground",
+        s.status === "working" && !s.override && "bg-card-2 text-muted hover:text-foreground",
+        s.status === "working" && s.override && "bg-primary/20 text-primary",
         isToday && "ring-1 ring-primary/70",
       )}
     >

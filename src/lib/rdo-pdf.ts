@@ -1,6 +1,6 @@
 import { addDays, formatHired, formatShort } from "./dates";
 import { downloadBlob } from "./share";
-import { WEEKDAY_SHORT, type Agency, type CalendarEvent, type Officer, type TimeOffRequest } from "./types";
+import { WEEKDAY_SHORT, type Agency, type CalendarEvent, type DutyOverride, type Officer, type TimeOffRequest } from "./types";
 import { statusForOfficer } from "./watch-logic";
 
 function pdfEscape(text: string): string {
@@ -19,6 +19,8 @@ function streamFor(input: {
   officers: Officer[];
   requests: TimeOffRequest[];
   events: CalendarEvent[];
+  /** Overtime & swaps — ignored by the RDO-only (standing pattern) PDF. */
+  overrides?: DutyOverride[];
   effectiveDate: string;
   rdoOnly: boolean;
   showDates: boolean;
@@ -42,6 +44,7 @@ function streamFor(input: {
   } = input;
   const requests = rdoOnly ? [] : input.requests;
   const events = rdoOnly ? [] : input.events;
+  const overrides = rdoOnly ? [] : (input.overrides ?? []);
   const pageW = 792;
   const pageH = 612;
   const marginX = 18;
@@ -173,10 +176,10 @@ function streamFor(input: {
     const stripe: [number, number, number] | undefined = rowIndex % 2 === 1 ? [0.96, 0.97, 0.97] : [1, 1, 1];
     const dayCells: Cell[] = WEEKDAY_SHORT.map((_, weekday) => {
       const iso = addDays(weekStart, weekday);
-      const s = statusForOfficer(officer, weekday, iso, requests, events);
+      const s = statusForOfficer(officer, weekday, iso, requests, events, overrides);
       if (s.status === "working") {
         counts[weekday] += 1;
-        return { text: "", fill: stripe };
+        return { text: s.override ? s.statusLabel : "", fill: stripe };
       }
       if (s.status === "rdo") {
         return { text: "RDO", fill: [0.82, 0.83, 0.85], color: [0.2, 0.22, 0.24] };
@@ -344,6 +347,8 @@ export async function buildRdoPdf(input: {
   officers: Officer[];
   requests: TimeOffRequest[];
   events: CalendarEvent[];
+  /** Overtime & swaps — ignored by the RDO-only (standing pattern) PDF. */
+  overrides?: DutyOverride[];
   effectiveDate: string;
   rdoOnly?: boolean;
   showDates?: boolean;
@@ -360,6 +365,7 @@ export async function buildRdoPdf(input: {
     officers: input.officers,
     requests: input.requests,
     events: input.events,
+    overrides: input.overrides,
     effectiveDate: input.effectiveDate,
     rdoOnly,
     showDates,
