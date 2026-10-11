@@ -95,6 +95,9 @@ export async function ensureShifts() {
       primary key (shift_id, event_id)
     )
   `);
+  // Overtime & swaps table and request-decision columns (0014 / 0015).
+  const { ensureLateSchema } = await import("@/lib/schema-ensure");
+  await ensureLateSchema(sql);
   await ensureAgencies();
   const existing = await sql<{ n: number }>`select count(*)::int as n from shifts`;
   if ((existing[0]?.n ?? 0) === 0) {
