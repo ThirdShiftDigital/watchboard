@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Building2, Clock, Shield, Users } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -89,6 +89,19 @@ function DashboardPage() {
           <Stat icon={Shield} label="Waiting" value={stats?.pending ?? "—"} warn={Boolean(stats?.pending)} />
           <Stat icon={Users} label="People" value={stats?.people ?? "—"} />
         </div>
+
+        {owner && (stats?.unassigned ?? 0) > 0 ? (
+          <Link
+            to="/account"
+            search={{ scope: "unassigned" }}
+            className="shrink-0 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm"
+          >
+            <span className="font-semibold">
+              {stats?.unassigned} {stats?.unassigned === 1 ? "login is" : "logins are"} unassigned
+            </span>
+            <span className="text-muted"> — no agency or shift yet. Assign them on Accounts →</span>
+          </Link>
+        ) : null}
 
         {(pending.data?.setups.length ?? 0) > 0 ? (
           <div className="max-h-40 shrink-0 overflow-y-auto">
