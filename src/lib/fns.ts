@@ -28,7 +28,9 @@ import {
   peekCalendarCache,
   readShiftCalendarCache,
   refreshShiftCalendarCache,
+  purgeCachedEvent,
   removeApprovedLeave,
+  shortenApprovedLeave,
   writeApprovedLeave,
   type LeaveCalendarWrite,
 } from "@/lib/calendar-sync";
@@ -249,6 +251,11 @@ export const getWatch = createServerFn({ method: "POST" })
       minWorking: shift.minWorking,
       shiftName: shift.name,
       overrides: access.caps.overtimeSwaps ? overrides : overrides.map((o) => ({ ...o, reason: "" })),
+      leave: access.caps.approveRequests
+        ? requests
+            .filter((r) => r.status === "approved" && r.startDate <= date && r.endDate >= date)
+            .map((r) => ({ id: r.id, startDate: r.startDate, endDate: r.endDate }))
+        : [],
     };
   });
 
@@ -699,10 +706,16 @@ export async function setRequestStatusFor(
     }
   } else if (row.calendar_event_id) {
     const removed = await removeApprovedLeave(shift.id, row.calendar_event_id);
-    await sql`
-      update time_off_requests set calendar_event_id = null where id = ${data.id}
-    `;
-    if (!removed.ok) {
+    if (removed.ok) {
+      // Gone from Google: forget the id and drop the cached copy now, so Zones
+      // (cache-only) puts the officer back without waiting for a refresh.
+      await sql`
+        update time_off_requests set calendar_event_id = null where id = ${data.id}
+      `;
+      await purgeCachedEvent(shift.id, row.calendar_event_id);
+    } else {
+      // Keep the id: the event is still on Google, and statusForOfficer ignores
+      // WatchBoard's own events, so the officer is still back on the board.
       calendar = { written: false, message: removed.message, reason: "error" };
     }
   }
@@ -1186,3 +1199,82 @@ export const disconnectGoogleCalendar = createServerFn({ method: "POST" })
 
 // Shared with overrides-fns.ts (Overtime & swaps) without changing these declarations.
 export { loadOfficers as loadShiftOfficers, loadRequests as loadShiftRequests };
+
+/**
+ * Return to duty: end an approved leave early. Leave now ends the day before
+ * `returnDate`; if that is on/before the first day, the leave is cancelled.
+ * Google: shorten (PATCH) or delete the event; the cached copy is dropped at
+ * once so Zones shows the officer without a Google round trip.
+ */
+export async function returnToDutyFor(userId: string, data: { id: number; returnDate: string }) {
+  const access = await requireCap(userId, "approveRequests");
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const rows = await sql<RequestRow>`
+    select id, officer_id, start_date, end_date, kind, reason, status, created_at::text as created_at, calendar_event_id, calendar_label
+    from time_off_requests where id = ${data.id} limit 1
+  `;
+  const row = rows[0];
+  if (!row) throw new Error("Request not found.");
+  const block = decisionBlock({
+    caps: access.caps,
+    officer: await officerPlacement(row.officer_id),
+    actorAgencyId: access.agencyId,
+    actorShiftId: (await activeShiftIdFor(userId)) || null,
+  });
+  if (block) throw new Error(block);
+  if (row.status !== "approved") throw new Error("Only approved leave can be ended early.");
+  if (data.returnDate > row.end_date) {
+    throw new Error("That leave already ends before the return date.");
+  }
+  const ownerShift = await sql<{ shift_id: string | null }>`
+    select shift_id from officers where id = ${row.officer_id} limit 1
+  `;
+  const shiftId = ownerShift[0]?.shift_id ?? (await requireCurrentShift(userId)).id;
+  const removeAll = data.returnDate <= row.start_date;
+  const newEnd = addDays(data.returnDate, -1);
+  let message: string | null = null;
+  if (removeAll) {
+    await sql`
+      update time_off_requests
+      set status = 'cancelled', decided_by = ${userId}, decided_at = now()
+      where id = ${data.id}
+    `;
+    if (row.calendar_event_id) {
+      const removed = await removeApprovedLeave(shiftId, row.calendar_event_id);
+      if (removed.ok) {
+        await sql`update time_off_requests set calendar_event_id = null where id = ${data.id}`;
+        await purgeCachedEvent(shiftId, row.calendar_event_id);
+      } else {
+        message = removed.message;
+      }
+    }
+  } else {
+    await sql`
+      update time_off_requests
+      set end_date = ${newEnd}, decided_by = ${userId}, decided_at = now()
+      where id = ${data.id}
+    `;
+    if (row.calendar_event_id) {
+      const res = await shortenApprovedLeave(shiftId, row.calendar_event_id, newEnd);
+      if (!res.ok && "gone" in res) {
+        await sql`update time_off_requests set calendar_event_id = null where id = ${data.id}`;
+      } else if (!res.ok) {
+        message = res.message;
+      }
+      // The request row is the truth for WatchBoard's own events either way.
+      await purgeCachedEvent(shiftId, row.calendar_event_id);
+    }
+  }
+  return {
+    ok: true as const,
+    removed: removeAll,
+    endDate: removeAll ? null : newEnd,
+    calendar: { message },
+  };
+}
+
+export const returnToDuty = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ id: z.number().int().positive(), returnDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }))
+  .handler(({ data, context }) => returnToDutyFor(context.userId, data));

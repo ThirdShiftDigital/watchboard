@@ -404,6 +404,38 @@ export async function createGoogleLeaveEventOAuth(input: {
   return { ok: true, eventId: data.id, calendarId };
 }
 
+/**
+ * Move an all-day leave event's last day (inclusive `endDate`; Google stores
+ * the exclusive next day). Used by "Return to duty" to shorten leave.
+ */
+export async function patchGoogleLeaveEventEndOAuth(
+  shiftId: string,
+  eventId: string,
+  endDate: string,
+): Promise<{ ok: true } | { ok: false; gone: true } | CalendarWriteFailure> {
+  const auth = await oauthTokensOrFailure(shiftId);
+  if (auth.failure) return auth.failure;
+  const calendarId = auth.tokens.calendarId || "primary";
+  const res = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${auth.tokens.accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ end: { date: addDays(endDate, 1) } }),
+      signal: AbortSignal.timeout(10_000),
+    },
+  ).catch(() => null);
+  if (!res) return { ok: false, reason: "error", message: "could not reach Google Calendar" };
+  if (res.ok) return { ok: true };
+  if (res.status === 404 || res.status === 410) return { ok: false, gone: true };
+  const failure = await describeGoogleWriteError(res);
+  console.error("[calendar] leave shorten failed", { shiftId, calendarId, status: res.status, reason: failure.reason });
+  return failure;
+}
+
 export async function deleteGoogleLeaveEventOAuth(
   shiftId: string,
   eventId: string,

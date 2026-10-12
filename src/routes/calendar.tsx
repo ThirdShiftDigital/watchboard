@@ -10,6 +10,7 @@ import { CalendarBanner } from "@/components/calendar-banner";
 import { CalendarFeedPanel } from "@/components/calendar-feed-sheet";
 import { RequestForm } from "@/components/request-form";
 import { DenyDialog } from "@/components/deny-dialog";
+import { ReturnToDutyDialog } from "@/components/return-to-duty-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -50,6 +51,7 @@ function CalendarPage() {
   const [requesting, setRequesting] = useState(false);
   const [callIn, setCallIn] = useState(false);
   const [removing, setRemoving] = useState<{ id: number; name: string } | null>(null);
+  const [returning, setReturning] = useState<{ id: number; name: string; startDate: string; endDate: string } | null>(null);
   const [feedOpen, setFeedOpen] = useState(false);
   const monthStart = startOfMonth(date);
   const monthDays = daysInMonth(date);
@@ -356,6 +358,16 @@ function CalendarPage() {
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <Badge tone="danger">{kindLabel(chip.kind)}</Badge>
+                  {canRemoveLeave && chip.endDate >= todayISO() ? (
+                    <Button
+                      size="sm"
+                      onClick={() =>
+                        setReturning({ id: chip.id, name: chip.name, startDate: chip.startDate, endDate: chip.endDate })
+                      }
+                    >
+                      Return
+                    </Button>
+                  ) : null}
                   {canRemoveLeave ? (
                     <Button
                       size="sm"
@@ -412,13 +424,26 @@ function CalendarPage() {
                     </span>
                   </button>
                   {canRemoveLeave ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setRemoving({ id: r.id, name: r.name })}
-                    >
-                      Remove
-                    </Button>
+                    <span className="flex shrink-0 gap-1">
+                      {r.endDate >= todayISO() ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() =>
+                            setReturning({ id: r.id, name: r.name, startDate: r.startDate, endDate: r.endDate })
+                          }
+                        >
+                          Return
+                        </Button>
+                      ) : null}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setRemoving({ id: r.id, name: r.name })}
+                      >
+                        Remove
+                      </Button>
+                    </span>
                   ) : null}
                 </li>
               ))}
@@ -427,6 +452,21 @@ function CalendarPage() {
         ) : null}
       </section>
 
+      {returning ? (
+        <ReturnToDutyDialog
+          leave={returning}
+          name={returning.name}
+          onClose={() => setReturning(null)}
+          onDone={async () => {
+            setReturning(null);
+            await Promise.all(
+              ["calendar", "requests", "watch", "schedule", "officer-portal"].map((k) =>
+                queryClient.invalidateQueries({ queryKey: [k] }),
+              ),
+            );
+          }}
+        />
+      ) : null}
       {removing ? (
         <DenyDialog
           title="Remove leave"

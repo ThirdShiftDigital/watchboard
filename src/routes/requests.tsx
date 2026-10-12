@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
 import { RequestForm } from "@/components/request-form";
 import { DenyDialog } from "@/components/deny-dialog";
+import { ReturnToDutyDialog } from "@/components/return-to-duty-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -36,6 +37,7 @@ function RequestsPage() {
   const [nameFilter, setNameFilter] = useState("");
   const [dateFilter, setDateFilter] = useState("");
   const [when, setWhen] = useState<"all" | "upcoming" | "past">("all");
+  const [returning, setReturning] = useState<TimeOffRequest | null>(null);
   const [denying, setDenying] = useState<{ req: TimeOffRequest; remove: boolean } | null>(null);
 
   const q = useQuery({
@@ -152,6 +154,11 @@ function RequestsPage() {
           {retryCal.isPending && retryCal.variables === req.id
             ? "Adding…"
             : "Add to Google Calendar"}
+        </Button>
+      ) : null}
+      {req.endDate >= todayISO() ? (
+        <Button size="sm" onClick={() => setReturning(req)}>
+          Return to duty
         </Button>
       ) : null}
       <Button
@@ -384,6 +391,21 @@ function RequestsPage() {
         </Section>
       ) : null}
 
+      {returning ? (
+        <ReturnToDutyDialog
+          leave={returning}
+          name={nameOf(returning.officerId)}
+          onClose={() => setReturning(null)}
+          onDone={async () => {
+            setReturning(null);
+            await Promise.all(
+              ["requests", "watch", "schedule", "calendar", "officer-portal"].map((k) =>
+                queryClient.invalidateQueries({ queryKey: [k] }),
+              ),
+            );
+          }}
+        />
+      ) : null}
       {denying ? (
         <DenyDialog
           title={denying.remove ? "Remove from calendar" : "Deny request"}

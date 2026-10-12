@@ -9,6 +9,7 @@ import { CalendarBanner } from "@/components/calendar-banner";
 import { DateBar } from "@/components/date-bar";
 import { SendSheet } from "@/components/send-sheet";
 import { OverrideSheet } from "@/components/override-sheet";
+import { ReturnToDutyDialog } from "@/components/return-to-duty-dialog";
 import { ZoneForm } from "@/components/zone-form";
 import { ZoneOrderSheet } from "@/components/zone-order-sheet";
 import { Badge } from "@/components/ui/badge";
@@ -56,6 +57,8 @@ function ZonesPage() {
   const access = useMyAccess();
   const canEdit = Boolean(access.data?.caps.editWatch);
   const canOverride = Boolean(access.data?.caps.overtimeSwaps);
+  const canApprove = Boolean(access.data?.caps.approveRequests);
+  const [returning, setReturning] = useState<{ id: number; name: string; startDate: string; endDate: string } | null>(null);
   const [duty, setDuty] = useState<{ officer: Officer; existing?: DutyOverride } | null>(null);
   const pendingCount = usePendingCount();
   const queryClient = useQueryClient();
@@ -190,7 +193,17 @@ function ZonesPage() {
 
   /** Overtime & swaps from the board: put an RDO officer on duty, or undo an entry. */
   function dutyAction(row: WatchRow): { label: string; onClick: () => void } | undefined {
-    if (!canOverride || !data) return undefined;
+    if (!data) return undefined;
+    if (row.status === "leave" && row.leaveId && canApprove) {
+      const leave = data.leave?.find((l) => l.id === row.leaveId);
+      if (leave) {
+        return {
+          label: "Return to duty",
+          onClick: () => setReturning({ ...leave, name: row.officer.name }),
+        };
+      }
+    }
+    if (!canOverride) return undefined;
     if (row.override) {
       const existing = data.overrides?.find((o) => o.officerId === row.officer.id && o.date === date);
       if (!existing) return undefined;
@@ -345,6 +358,21 @@ function ZonesPage() {
           onCancel={() => setForm(null)}
           onSave={(officerId, zone) => save.mutate({ officerId, zone })}
           onRemove={form.officer ? () => remove.mutate(form.officer!.id) : undefined}
+        />
+      ) : null}
+      {returning ? (
+        <ReturnToDutyDialog
+          leave={returning}
+          name={returning.name}
+          onClose={() => setReturning(null)}
+          onDone={async () => {
+            setReturning(null);
+            await Promise.all(
+              ["watch", "requests", "schedule", "calendar", "officer-portal"].map((k) =>
+                queryClient.invalidateQueries({ queryKey: [k] }),
+              ),
+            );
+          }}
         />
       ) : null}
       {duty && data ? (
