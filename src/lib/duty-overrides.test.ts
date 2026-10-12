@@ -62,6 +62,15 @@ describe("statusForOfficer precedence with overtime & swaps", () => {
     const s = statusForOfficer(smith, 1, MON, [], [calHit("smith", MON)], [ov({ officerId: "smith", date: MON, status: "working", kind: "swap" })]);
     assert.deepEqual([s.status, s.statusLabel], ["working", "SWAP"]);
   });
+  it("ignores Google events WatchBoard wrote for its own requests (any status)", () => {
+    const ev = { ...calHit("jones", MON), id: "wb1" };
+    const cancelled: TimeOffRequest = { ...leave("jones", MON), status: "cancelled", calendarEventId: "wb1" };
+    assert.equal(statusForOfficer(jones, 1, MON, [cancelled], [ev]).status, "working");
+    assert.equal(statusForOfficer(jones, 1, MON, [], [ev]).status, "calendar", "outside events still count");
+  });
+  it("leave rows carry the request id", () => {
+    assert.equal(statusForOfficer(jones, 1, MON, [leave("jones", MON)], []).leaveId, 9);
+  });
   it("an override on another date changes nothing", () => {
     const s = statusForOfficer(smith, 1, MON, [], [], [ov({ officerId: "smith", date: "2026-10-19", status: "working", kind: "ot" })]);
     assert.equal(s.status, "rdo");

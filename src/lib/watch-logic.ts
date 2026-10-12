@@ -26,7 +26,14 @@ export function statusForOfficer(
   requests: TimeOffRequest[],
   events: CalendarEvent[],
   overrides: DutyOverride[] = [],
-): { status: DutyStatus; statusLabel: string; eventTitle?: string; override?: OverrideKind } {
+): {
+  status: DutyStatus;
+  statusLabel: string;
+  eventTitle?: string;
+  override?: OverrideKind;
+  /** The approved request that makes them off (status "leave"). */
+  leaveId?: number;
+} {
   const leave = requests.find(
     (r) =>
       r.status === "approved" &&
@@ -36,7 +43,7 @@ export function statusForOfficer(
   );
   const ov = overrides.find((o) => o.officerId === officer.id && o.date === date);
   if (ov) {
-    if (leave) return { status: "leave", statusLabel: kindShort(leave.kind) };
+    if (leave) return { status: "leave", statusLabel: kindShort(leave.kind), leaveId: leave.id };
     if (ov.status === "off") {
       return { status: "leave", statusLabel: overrideLabel(ov.kind), override: ov.kind };
     }
@@ -46,12 +53,15 @@ export function statusForOfficer(
     return { status: "rdo", statusLabel: "RDO" };
   }
   if (leave) {
-    return { status: "leave", statusLabel: kindShort(leave.kind) };
+    return { status: "leave", statusLabel: kindShort(leave.kind), leaveId: leave.id };
   }
+  // Events WatchBoard wrote for its own requests are decided by the request
+  // row (approved / shortened / removed), never by a cached Google copy.
   const hit = events.find(
     (e) =>
       e.matchedOfficerIds.includes(officer.id) &&
-      eventTouchesDate(e.start, e.end, date),
+      eventTouchesDate(e.start, e.end, date) &&
+      !requests.some((r) => r.calendarEventId && r.calendarEventId === e.id),
   );
   if (hit) {
     return {
@@ -82,6 +92,7 @@ export function buildRows(
       zone: s.status === "working" ? (zoneByOfficer.get(officer.id) ?? null) : null,
       eventTitle: s.eventTitle,
       ...(s.override ? { override: s.override } : {}),
+      ...(s.leaveId ? { leaveId: s.leaveId } : {}),
     };
   });
 }

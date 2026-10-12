@@ -191,6 +191,8 @@ export type WatchRow = {
   eventTitle?: string;
   /** Set when an Overtime / Swap entry decides this row (badge OT / SWAP). */
   override?: OverrideKind;
+  /** Approved request behind a "leave" row (for Return to duty). */
+  leaveId?: number;
 };
 
 export type WatchBoard = {
@@ -210,7 +212,8 @@ export type WatchBoard = {
   minWorking: number;
   shiftName?: string;
   /** Overtime & swap entries on this date (DB only). */
-  overrides?: DutyOverride[];
+  overrides?: DutyOverride[];  /** Approved leave covering this date (for Return to duty). */
+  leave?: { id: number; startDate: string; endDate: string }[];
 };
 
 export const DEFAULT_ZONE_ORDER: string[] = ZONES.map((z) => z.id);

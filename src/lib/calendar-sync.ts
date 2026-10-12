@@ -4,6 +4,7 @@ import {
   deleteGoogleLeaveEvent,
   deleteGoogleLeaveEventOAuth,
   fetchGoogleCalendar,
+  patchGoogleLeaveEventEndOAuth,
   fetchGoogleCalendarOAuth,
   type CalendarWriteFailure,
 } from "@/lib/google-calendar";
@@ -577,4 +578,33 @@ export async function removeApprovedLeave(
     if (legacy?.ok) return { ok: true };
   }
   return { ok: false, message: oauth.message };
+}
+
+/**
+ * Drop one WatchBoard-written event from the shift's calendar cache right away,
+ * so Zones (cache-only) reflects a removed / shortened leave without waiting
+ * for the next Google refresh.
+ */
+export async function purgeCachedEvent(shiftId: string, eventId: string | null | undefined) {
+  if (!eventId) return;
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  await sql`delete from calendar_cache where shift_id = ${shiftId} and event_id = ${eventId}`;
+}
+
+/** Shorten an approved leave's Google event to end on `endDate` (inclusive). */
+export async function shortenApprovedLeave(
+  shiftId: string,
+  eventId: string | null | undefined,
+  endDate: string,
+): Promise<{ ok: true } | { ok: false; gone: true } | { ok: false; message: string }> {
+  if (!eventId) return { ok: true };
+  const res = await patchGoogleLeaveEventEndOAuth(shiftId, eventId, endDate).catch((e: unknown) => ({
+    ok: false as const,
+    reason: "error" as const,
+    message: e instanceof Error ? e.message : "could not update the Google Calendar event",
+  }));
+  if (res.ok) return { ok: true };
+  if ("gone" in res) return res;
+  return { ok: false, message: res.message };
 }
