@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { OffAuditLine } from "@/components/off-audit-line";
 import { Navigate, createFileRoute } from "@tanstack/react-router";
 import { ChevronLeft, ChevronRight, Link2 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -355,6 +356,11 @@ function CalendarPage() {
                     <span className="mx-1.5 text-subtle">·</span>
                     All day
                   </p>
+                  <OffAuditLine
+                    entityType="request"
+                    entityId={chip.id}
+                    audit={requests.find((r) => r.id === chip.id)?.audit}
+                  />
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <Badge tone="danger">{kindLabel(chip.kind)}</Badge>

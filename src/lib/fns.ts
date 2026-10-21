@@ -16,6 +16,7 @@ import { buildRows, deriveLastName, leaveEventDescription, leaveEventSummary, st
 import { applySeniority, normalizeZoneOrder, sortRoster } from "@/lib/types";
 import { requestForBlock } from "@/lib/access";
 import { isMissingTable, loadOverrides } from "@/lib/overrides-db";
+import { recordOffAudit, withAuditStamps } from "@/lib/off-audit";
 import { cleanDenialReason, decisionBlock, visibleDenialReason } from "@/lib/request-decision";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { requireCap, accessFor, officerPlacement } from "@/lib/staff";
@@ -234,6 +235,23 @@ export const getWatch = createServerFn({ method: "POST" })
       // drop the calendar event list and titles.
       rows = rows.map((r) => (r.eventTitle ? { ...r, eventTitle: undefined } : r));
     }
+    // Audit stamps: shift commander of this shift only (else omitted entirely).
+    const visibleOverrides = await withAuditStamps(
+      access,
+      shift.id,
+      "override",
+      access.caps.overtimeSwaps ? overrides : overrides.map((o) => ({ ...o, reason: "" })),
+    );
+    const visibleLeave = access.caps.approveRequests
+      ? await withAuditStamps(
+          access,
+          shift.id,
+          "request",
+          requests
+            .filter((r) => r.status === "approved" && r.startDate <= date && r.endDate >= date)
+            .map((r) => ({ id: r.id, startDate: r.startDate, endDate: r.endDate })),
+        )
+      : [];
     return {
       date,
       weekday,
@@ -250,12 +268,8 @@ export const getWatch = createServerFn({ method: "POST" })
       zoneOrder: shift.zoneOrder,
       minWorking: shift.minWorking,
       shiftName: shift.name,
-      overrides: access.caps.overtimeSwaps ? overrides : overrides.map((o) => ({ ...o, reason: "" })),
-      leave: access.caps.approveRequests
-        ? requests
-            .filter((r) => r.status === "approved" && r.startDate <= date && r.endDate >= date)
-            .map((r) => ({ id: r.id, startDate: r.startDate, endDate: r.endDate }))
-        : [],
+      overrides: visibleOverrides,
+      leave: visibleLeave,
     };
   });
 
@@ -408,12 +422,13 @@ export const listRequests = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     // Full list (with reasons) is the Requests page — approvers only.
-    await requireCap(context.userId, "approveRequests");
+    const access = await requireCap(context.userId, "approveRequests");
     const shift = await currentShiftFor(context.userId);
-    const [requests, officers] = await Promise.all([
+    const [rawRequests, officers] = await Promise.all([
       loadRequests(shift.id),
       loadOfficers(shift.id),
     ]);
+    const requests = await withAuditStamps(access, shift.id, "request", rawRequests);
     return { requests, officers, googleCalendar: Boolean(shift.googleCalendar) };
   });
 
@@ -593,7 +608,17 @@ export const createRequest = createServerFn({ method: "POST" })
       values (${data.officerId}, ${data.startDate}, ${data.endDate}, ${data.kind}, ${data.reason}, 'pending')
       returning id
     `;
-    return { id: Number(rows[0]?.id) };
+    const id = Number(rows[0]?.id);
+    await recordOffAudit({
+      entityType: "request",
+      entityId: id,
+      officerId: data.officerId,
+      action: "created",
+      actorUserId: context.userId,
+      after: { status: "pending", kind: data.kind, startDate: data.startDate, endDate: data.endDate },
+      summary: `Requested ${data.kind} ${data.startDate}${data.endDate !== data.startDate ? ` to ${data.endDate}` : ""}`,
+    });
+    return { id };
   });
 
 type CalendarOutcome = {
@@ -673,6 +698,17 @@ export async function setRequestStatusFor(
       where id = ${data.id}
     `;
   }
+  await recordOffAudit({
+    entityType: "request",
+    entityId: data.id,
+    officerId: row.officer_id,
+    shiftId: shift.id,
+    action: data.status === "approved" ? "approved" : data.status === "denied" ? "denied" : "restored",
+    actorUserId: userId,
+    before: { status: row.status },
+    after: { status: data.status },
+    summary: `${row.status} → ${data.status} (${row.kind} ${row.start_date}${row.end_date !== row.start_date ? ` to ${row.end_date}` : ""})`,
+  });
   let calendar: CalendarOutcome = { written: false, message: null, reason: null };
   if (data.status === "approved") {
     await sql`
@@ -804,6 +840,16 @@ export const cancelMyRequest = createServerFn({ method: "POST" })
     await sql`
       update time_off_requests set status = 'cancelled' where id = ${data.id}
     `;
+    await recordOffAudit({
+      entityType: "request",
+      entityId: data.id,
+      officerId: row.officer_id,
+      action: "cancelled",
+      actorUserId: context.userId,
+      before: { status: row.status },
+      after: { status: "cancelled" },
+      summary: `Cancelled pending ${row.kind} ${row.start_date}${row.end_date !== row.start_date ? ` to ${row.end_date}` : ""}`,
+    });
     return { ok: true as const };
   });
 
@@ -837,6 +883,16 @@ export const callInLeave = createServerFn({ method: "POST" })
       returning id
     `;
     const id = Number(rows[0]?.id);
+    await recordOffAudit({
+      entityType: "request",
+      entityId: id,
+      officerId: data.officerId,
+      shiftId: shift.id,
+      action: "created",
+      actorUserId: context.userId,
+      after: { status: "approved", kind: data.kind, startDate: data.startDate, endDate: data.endDate, callIn: true },
+      summary: `Called in ${data.kind} ${data.startDate}${data.endDate !== data.startDate ? ` to ${data.endDate}` : ""}`,
+    });
     await sql`
       delete from zone_assignments
       where officer_id = ${data.officerId}
@@ -1027,6 +1083,40 @@ export const deleteOfficer = createServerFn({ method: "POST" })
     const { getSql } = await import("@/lib/db");
     const sql = await getSql();
     await sql`delete from zone_assignments where officer_id = ${data.id}`;
+    // Audit what goes with the officer (recorded before the rows disappear).
+    const gone = await sql<{ id: number; kind: string; start_date: string; end_date: string; status: string }>`
+      select id, kind, start_date, end_date, status from time_off_requests where officer_id = ${data.id}
+    `;
+    for (const r of gone) {
+      await recordOffAudit({
+        entityType: "request",
+        entityId: r.id,
+        officerId: data.id,
+        action: "removed",
+        actorUserId: context.userId,
+        before: { status: r.status, kind: r.kind, startDate: r.start_date, endDate: r.end_date },
+        summary: `Removed with the officer's roster entry (${r.kind} ${r.start_date})`,
+      });
+    }
+    const goneOverrides = await sql<{ id: number; officer_id: string; date: string; status: string; kind: string }>`
+      select id, officer_id, date, status, kind from duty_overrides
+      where officer_id = ${data.id}
+         or swap_group in (select swap_group from duty_overrides where officer_id = ${data.id} and swap_group is not null)
+    `.catch((err: unknown) => {
+      if (!isMissingTable(err)) throw err;
+      return [] as Array<{ id: number; officer_id: string; date: string; status: string; kind: string }>;
+    });
+    for (const o of goneOverrides) {
+      await recordOffAudit({
+        entityType: "override",
+        entityId: o.id,
+        officerId: o.officer_id,
+        action: "removed",
+        actorUserId: context.userId,
+        before: { date: o.date, status: o.status, kind: o.kind },
+        summary: `Removed with a deleted roster entry (${o.kind} ${o.status} ${o.date})`,
+      });
+    }
     await sql`delete from time_off_requests where officer_id = ${data.id}`;
     // Their overtime entries and both sides of any swap they were in.
     await sql`
@@ -1069,8 +1159,8 @@ export const getSchedule = createServerFn({ method: "POST" })
     return {
       weekStart,
       officers,
-      requests: hideOthersReasons(requests, access),
-      overrides,
+      requests: await withAuditStamps(access, shift.id, "request", hideOthersReasons(requests, access)),
+      overrides: await withAuditStamps(access, shift.id, "override", overrides),
       calendar,
       effectiveDate: shift.effectiveDate,
       minWorking: shift.minWorking,
@@ -1117,7 +1207,12 @@ export const getCalendarMonth = createServerFn({ method: "POST" })
           access,
         );
     const calendar = await fetchCalendar(officers, data.from, data.to, shift, access.caps.editWatch);
-    return { officers, requests, calendar, overrides };
+    return {
+      officers,
+      requests: await withAuditStamps(access, shift.id, "request", requests),
+      calendar,
+      overrides: await withAuditStamps(access, shift.id, "override", overrides),
+    };
   });
 
 export const getCalendarFeed = createServerFn({ method: "POST" })
@@ -1234,6 +1329,19 @@ export async function returnToDutyFor(userId: string, data: { id: number; return
   const removeAll = data.returnDate <= row.start_date;
   const newEnd = addDays(data.returnDate, -1);
   let message: string | null = null;
+  await recordOffAudit({
+    entityType: "request",
+    entityId: data.id,
+    officerId: row.officer_id,
+    shiftId,
+    action: "ended_early",
+    actorUserId: userId,
+    before: { status: row.status, endDate: row.end_date },
+    after: removeAll ? { status: "cancelled" } : { status: row.status, endDate: newEnd },
+    summary: removeAll
+      ? `Return to duty ${data.returnDate}: ${row.kind} leave removed`
+      : `Return to duty ${data.returnDate}: ${row.kind} now ends ${newEnd} (was ${row.end_date})`,
+  });
   if (removeAll) {
     await sql`
       update time_off_requests
