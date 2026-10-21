@@ -132,6 +132,8 @@ export type TimeOffRequest = {
   denialReason?: string | null;
   /** Last approve / deny / restore (ISO, UTC); null for older requests. */
   decidedAt?: string | null;
+  /** "Marked off by" stamp — present ONLY for the shift commander of this shift (server-gated). */
+  audit?: { markedBy: string; markedAt: string };
 };
 
 /** Per-date exception to the standing RDO pattern (migrations/0014_duty_overrides.sql). */
@@ -148,6 +150,8 @@ export type DutyOverride = {
   swapGroup: string | null;
   isPayback: boolean;
   reason: string;
+  /** "Marked off by" stamp — present ONLY for the shift commander of this shift (server-gated). */
+  audit?: { markedBy: string; markedAt: string };
 };
 
 export function overrideLabel(kind: OverrideKind): string {
@@ -213,7 +217,7 @@ export type WatchBoard = {
   shiftName?: string;
   /** Overtime & swap entries on this date (DB only). */
   overrides?: DutyOverride[];  /** Approved leave covering this date (for Return to duty). */
-  leave?: { id: number; startDate: string; endDate: string }[];
+  leave?: { id: number; startDate: string; endDate: string; audit?: { markedBy: string; markedAt: string } }[];
 };
 
 export const DEFAULT_ZONE_ORDER: string[] = ZONES.map((z) => z.id);

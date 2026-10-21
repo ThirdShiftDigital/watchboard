@@ -13,6 +13,7 @@ import { RedirectToSignIn, UserButton } from "@/lib/auth/gates";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { cn } from "@/lib/cn";
 import { addDays, eventDayRange, eventOverlapsRange, formatLong, formatShort, formatStamp, startOfWeek, todayISO } from "@/lib/dates";
+import { TimeOffTotalsCard } from "@/components/time-off-totals";
 import { cancelMyRequest, createRequest, getOfficerPortal, listShiftLeave } from "@/lib/fns";
 import { useMyAccess } from "@/lib/hooks";
 import { useOfficerSession } from "@/lib/officer-session";
@@ -55,7 +56,12 @@ function OfficerPage() {
   const requests = portalQuery.data?.requests ?? [];
   const watchRow = portalQuery.data?.todayRow ?? undefined;
   const events = portalQuery.data?.calendar?.events ?? [];
-  const overrides = portalQuery.data?.overrides ?? [];
+  const portal = portalQuery.data as (typeof portalQuery.data & {
+    overrides?: import("@/lib/types").DutyOverride[];
+    timeOff?: { week: import("@/lib/time-off-totals").TimeOffTotals; month: import("@/lib/time-off-totals").TimeOffTotals };
+  }) | undefined;
+  const overrides = portal?.overrides ?? [];
+  const timeOff = portal?.timeOff;
   const locked = Boolean(linkedId);
 
   const week = useMemo(() => {
@@ -208,6 +214,8 @@ function OfficerPage() {
               </p>
               <TodayStatus row={watchRow} />
             </section>
+
+            {timeOff ? <TimeOffTotalsCard key={officer.id} officerId={officer.id} initial={timeOff} /> : null}
 
             <section>
               <p className="mb-2 text-2xs uppercase tracking-wide text-muted">This week</p>

@@ -19,6 +19,7 @@ import { Route as HomeRouteImport } from './routes/home'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as MeRouteImport } from './routes/me'
 import { Route as OnboardRouteImport } from './routes/onboard'
+import { Route as PrintTimeoffRouteImport } from './routes/print-timeoff'
 import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as RequestsRouteImport } from './routes/requests'
 import { Route as ResetRouteImport } from './routes/reset'
@@ -78,6 +79,11 @@ const OnboardRoute = OnboardRouteImport.update({
   path: '/onboard',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PrintTimeoffRoute = PrintTimeoffRouteImport.update({
+  id: '/print-timeoff',
+  path: '/print-timeoff',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const PrivacyRoute = PrivacyRouteImport.update({
   id: '/privacy',
   path: '/privacy',
@@ -130,6 +136,7 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/me': typeof MeRoute
   '/onboard': typeof OnboardRoute
+  '/print-timeoff': typeof PrintTimeoffRoute
   '/privacy': typeof PrivacyRoute
   '/requests': typeof RequestsRoute
   '/reset': typeof ResetRoute
@@ -150,6 +157,7 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/me': typeof MeRoute
   '/onboard': typeof OnboardRoute
+  '/print-timeoff': typeof PrintTimeoffRoute
   '/privacy': typeof PrivacyRoute
   '/requests': typeof RequestsRoute
   '/reset': typeof ResetRoute
@@ -171,6 +179,7 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/me': typeof MeRoute
   '/onboard': typeof OnboardRoute
+  '/print-timeoff': typeof PrintTimeoffRoute
   '/privacy': typeof PrivacyRoute
   '/requests': typeof RequestsRoute
   '/reset': typeof ResetRoute
@@ -193,6 +202,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/me'
     | '/onboard'
+    | '/print-timeoff'
     | '/privacy'
     | '/requests'
     | '/reset'
@@ -213,6 +223,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/me'
     | '/onboard'
+    | '/print-timeoff'
     | '/privacy'
     | '/requests'
     | '/reset'
@@ -233,6 +244,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/me'
     | '/onboard'
+    | '/print-timeoff'
     | '/privacy'
     | '/requests'
     | '/reset'
@@ -254,6 +266,7 @@ export interface RootRouteChildren {
   LoginRoute: typeof LoginRoute
   MeRoute: typeof MeRoute
   OnboardRoute: typeof OnboardRoute
+  PrintTimeoffRoute: typeof PrintTimeoffRoute
   PrivacyRoute: typeof PrivacyRoute
   RequestsRoute: typeof RequestsRoute
   ResetRoute: typeof ResetRoute
@@ -336,6 +349,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OnboardRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/print-timeoff': {
+      id: '/print-timeoff'
+      path: '/print-timeoff'
+      fullPath: '/print-timeoff'
+      preLoaderRoute: typeof PrintTimeoffRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/privacy': {
       id: '/privacy'
       path: '/privacy'
@@ -406,6 +426,7 @@ const rootRouteChildren: RootRouteChildren = {
   LoginRoute: LoginRoute,
   MeRoute: MeRoute,
   OnboardRoute: OnboardRoute,
+  PrintTimeoffRoute: PrintTimeoffRoute,
   PrivacyRoute: PrivacyRoute,
   RequestsRoute: RequestsRoute,
   ResetRoute: ResetRoute,

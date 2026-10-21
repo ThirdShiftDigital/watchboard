@@ -5,6 +5,7 @@ import { type ReactNode, useState } from "react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
 import { RequestForm } from "@/components/request-form";
+import { OffAuditLine } from "@/components/off-audit-line";
 import { DenyDialog } from "@/components/deny-dialog";
 import { ReturnToDutyDialog } from "@/components/return-to-duty-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -485,6 +486,7 @@ function RequestCard({
           {req.status === "denied" && req.denialReason ? (
             <p className="mt-1 text-sm text-destructive">Denied: {req.denialReason}</p>
           ) : null}
+          <OffAuditLine entityType="request" entityId={req.id} audit={req.audit} className="mt-1" />
         </div>
         <Badge tone={statusTone(req.status)}>{statusLabel(req.status)}</Badge>
       </div>

@@ -12,6 +12,7 @@ import { addDays, todayISO } from "@/lib/dates";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { requireCap, officerPlacement } from "@/lib/staff";
 import { activeShiftIdFor, requireCurrentShift, currentShiftFor } from "@/lib/shifts";
+import { recordOffAudit } from "@/lib/off-audit";
 import { loadShiftOfficers, loadShiftRequests } from "@/lib/fns";
 import {
   overrideBlock,
@@ -64,18 +65,32 @@ async function insertRows(rows: OverrideRowSpec[], shiftId: string, userId: stri
     params.push(shiftId, r.officerId, r.date, r.status, r.kind, r.partnerOfficerId, r.swapGroup, r.isPayback, r.reason, userId);
     return `(${Array.from({ length: 10 }, (_, i) => `$${base + i + 1}`).join(", ")})`;
   });
+  let inserted: Array<{ id: number; officer_id: string; date: string; status: string; kind: string; is_payback: boolean }> = [];
   try {
-    await sql.query(
+    inserted = (await sql.query(
       `insert into duty_overrides
          (shift_id, officer_id, date, status, kind, partner_officer_id, swap_group, is_payback, reason, created_by)
-       values ${tuples.join(", ")}`,
+       values ${tuples.join(", ")}
+       returning id, officer_id, date, status, kind, is_payback`,
       params,
-    );
+    )) as typeof inserted;
   } catch (err) {
     if (isMissingTable(err)) throw new Error(OVERRIDES_NOT_READY);
     const e = err as { code?: string };
     if (e?.code === "23505") throw new Error("Someone already has an overtime or swap entry on that date.");
     throw err;
+  }
+  for (const r of inserted) {
+    await recordOffAudit({
+      entityType: "override",
+      entityId: r.id,
+      officerId: r.officer_id,
+      shiftId,
+      action: "created",
+      actorUserId: userId,
+      after: { date: r.date, status: r.status, kind: r.kind, payback: Boolean(r.is_payback) },
+      summary: `${r.kind === "ot" ? "Overtime" : r.is_payback ? "Swap payback" : "Swap"}: ${r.status === "off" ? "off" : "working"} ${r.date}`,
+    });
   }
   // Anyone now off loses a posted zone for that date.
   for (const r of rows.filter((x) => x.status === "off")) {
@@ -178,6 +193,17 @@ export async function removeOverrideFor(userId: string, data: { id: number }) {
   // Officers who were on duty only because of these rows lose that day's zone.
   for (const g of group.filter((x) => x.status === "working")) {
     await sql`delete from zone_assignments where officer_id = ${g.officerId} and date = ${g.date}`;
+  }
+  for (const g of group) {
+    await recordOffAudit({
+      entityType: "override",
+      entityId: g.id,
+      officerId: g.officerId,
+      action: "removed",
+      actorUserId: userId,
+      before: { date: g.date, status: g.status, kind: g.kind },
+      summary: `Removed ${g.kind === "ot" ? "overtime" : "swap"} (${g.status} ${g.date})`,
+    });
   }
   if (target.swapGroup) {
     await sql`delete from duty_overrides where swap_group = ${target.swapGroup}`;

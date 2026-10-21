@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { OffAuditLine } from "@/components/off-audit-line";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { ArrowUpDown, Check, ChevronRight, Plus, RefreshCw, Share2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -191,6 +192,17 @@ function ZonesPage() {
     : undefined;
   const rosterEmpty = Boolean(data && data.officers.length === 0);
 
+  /** Audit stamp for an off row (present only for this shift's commander). */
+  function auditFor(row: WatchRow): AuditRef | undefined {
+    if (!data) return undefined;
+    if (row.leaveId) {
+      const l = data.leave?.find((x) => x.id === row.leaveId);
+      return l?.audit ? { entityType: "request", entityId: l.id, audit: l.audit } : undefined;
+    }
+    const o = data.overrides?.find((x) => x.officerId === row.officer.id && x.date === date);
+    return o?.audit ? { entityType: "override", entityId: o.id, audit: o.audit } : undefined;
+  }
+
   /** Overtime & swaps from the board: put an RDO officer on duty, or undo an entry. */
   function dutyAction(row: WatchRow): { label: string; onClick: () => void } | undefined {
     if (!data) return undefined;
@@ -336,6 +348,7 @@ function ZonesPage() {
                 : undefined
             }
             action={dutyAction(row)}
+            audit={auditFor(row)}
           />
         ))}
       </ul>
@@ -415,14 +428,22 @@ function ZonesPage() {
   );
 }
 
+type AuditRef = {
+  entityType: "request" | "override";
+  entityId: number;
+  audit: { markedBy: string; markedAt: string };
+};
+
 function ZoneRow({
   row,
   onOpen,
   action,
+  audit,
 }: {
   row: WatchRow;
   onOpen?: () => void;
   action?: { label: string; onClick: () => void };
+  audit?: AuditRef;
 }) {
   const off = row.status !== "working";
   const hint = row.zone ? zoneHint(row.zone) : "";
@@ -465,6 +486,9 @@ function ZoneRow({
           {onOpen ? <ChevronRight className="size-4 shrink-0 text-subtle" /> : null}
         </span>
       </button>
+      {audit ? (
+        <OffAuditLine className="-mt-2 px-4 pb-2" entityType={audit.entityType} entityId={audit.entityId} audit={audit.audit} />
+      ) : null}
       {action ? (
         <div className="-mt-2 px-4 pb-3">
           <button

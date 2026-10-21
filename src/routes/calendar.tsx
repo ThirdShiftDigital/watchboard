@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { OffAuditLine } from "@/components/off-audit-line";
 import { Navigate, createFileRoute } from "@tanstack/react-router";
 import { ChevronLeft, ChevronRight, Link2 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -31,7 +32,7 @@ import { useMyAccess, usePendingCount, useSupervisorReady } from "@/lib/hooks";
 import { useRefetchWhenConnectorReady } from "@/lib/app-data";
 import { useWatchDate } from "@/lib/store";
 import { WEEKDAYS, kindLabel } from "@/lib/types";
-import { approvedLeaveInRange, approvedLeaveOnDate, statusForOfficer } from "@/lib/watch-logic";
+import { approvedLeaveInRange, approvedLeaveOnDate, offOnDate, statusForOfficer } from "@/lib/watch-logic";
 
 export const Route = createFileRoute("/calendar")({ component: CalendarPage });
 
@@ -83,9 +84,10 @@ function CalendarPage() {
   const overrides = q.data?.overrides ?? [];
   const today = todayISO();
 
-  const selectedLeave = useMemo(
-    () => approvedLeaveOnDate(date, requests, officers),
-    [date, requests, officers],
+  // Day list: only people off (leave / sick / call-in, calendar leave, RDO, swap off side).
+  const dayOff = useMemo(
+    () => offOnDate(date, officers, requests, events, overrides),
+    [date, officers, requests, events, overrides],
   );
 
   const monthLeave = useMemo(
@@ -103,7 +105,6 @@ function CalendarPage() {
     return { working, off };
   }, [officers, date, requests, events, overrides]);
 
-  const dayEvents = events.filter((e) => eventTouchesDate(e.start, e.end, date));
 
   async function removeLeave(id: number, name: string, denialReason: string) {
     try {
@@ -338,72 +339,57 @@ function CalendarPage() {
         </div>
 
         <h3 className="mt-6 text-2xs uppercase tracking-wide-plus text-muted">
-          Filled on calendar
+          Off this day{dayOff.length ? ` · ${dayOff.length}` : ""}
         </h3>
-        {selectedLeave.length === 0 ? (
-          <p className="mt-2 text-sm text-muted">No approved leave on this day.</p>
+        {dayOff.length === 0 ? (
+          <p className="mt-2 text-sm text-muted">Nobody is off this day.</p>
         ) : (
           <ul className="mt-2 divide-y divide-border">
-            {selectedLeave.map((chip) => (
-              <li key={chip.id} className="flex items-center justify-between gap-3 py-3">
-                <div className="min-w-0">
-                  <p className="text-sm font-medium">{chip.name}</p>
-                  <p className="mt-1 text-xs text-muted">
-                    {chip.startDate === chip.endDate
-                      ? formatShort(chip.startDate)
-                      : `${formatShort(chip.startDate)} – ${formatShort(chip.endDate)}`}
-                    <span className="mx-1.5 text-subtle">·</span>
-                    All day
-                  </p>
-                </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  <Badge tone="danger">{kindLabel(chip.kind)}</Badge>
-                  {canRemoveLeave && chip.endDate >= todayISO() ? (
-                    <Button
-                      size="sm"
-                      onClick={() =>
-                        setReturning({ id: chip.id, name: chip.name, startDate: chip.startDate, endDate: chip.endDate })
-                      }
-                    >
-                      Return
-                    </Button>
-                  ) : null}
-                  {canRemoveLeave ? (
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      onClick={() => setRemoving({ id: chip.id, name: chip.name })}
-                    >
-                      Remove
-                    </Button>
-                  ) : null}
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-
-        <h3 className="mt-6 text-2xs uppercase tracking-wide-plus text-muted">
-          Calendar events
-        </h3>
-        {dayEvents.length === 0 ? (
-          <p className="mt-2 text-sm text-muted">
-            No events from the leave feed on this day.
-          </p>
-        ) : (
-          <ul className="mt-2 divide-y divide-border">
-            {dayEvents.map((e) => (
-              <li key={e.id} className="py-3">
-                <p className="text-sm font-medium">{e.title}</p>
-                <p className="mt-1 text-xs text-muted">
-                  {e.matchedOfficerIds.length
-                    ? `Matched ${e.matchedOfficerIds
-                        .map((id) => officers.find((o) => o.id === id)?.name ?? id)
-                        .join(", ")}`
-                    : "No deputy name matched"}
-                </p>
-              </li>
-            ))}
+            {dayOff.map((e) => {
+              const req = e.leaveId ? requests.find((r) => r.id === e.leaveId) : undefined;
+              const ov = e.overrideKind
+                ? overrides.find((o) => o.officerId === e.officer.id && o.date === date)
+                : undefined;
+              const detail = req
+                ? req.startDate === req.endDate
+                  ? formatShort(req.startDate)
+                  : `${formatShort(req.startDate)} – ${formatShort(req.endDate)}`
+                : e.status === "rdo"
+                  ? "Regular day off"
+                  : e.overrideKind
+                    ? "Swapped off"
+                    : (e.eventTitle ?? "On the leave calendar");
+              return (
+                <li key={e.officer.id} className="flex items-center justify-between gap-3 py-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium">{e.officer.name}</p>
+                    <p className="mt-1 truncate text-xs text-muted">{detail}</p>
+                    {req ? <OffAuditLine entityType="request" entityId={req.id} audit={req.audit} /> : null}
+                    {ov ? <OffAuditLine entityType="override" entityId={ov.id} audit={ov.audit} /> : null}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Badge tone={e.status === "rdo" ? "rdo" : "danger"}>
+                      {req ? kindLabel(req.kind) : e.statusLabel}
+                    </Badge>
+                    {req && canRemoveLeave && req.endDate >= todayISO() ? (
+                      <Button
+                        size="sm"
+                        onClick={() =>
+                          setReturning({ id: req.id, name: e.officer.name, startDate: req.startDate, endDate: req.endDate })
+                        }
+                      >
+                        Return
+                      </Button>
+                    ) : null}
+                    {req && canRemoveLeave ? (
+                      <Button size="sm" variant="secondary" onClick={() => setRemoving({ id: req.id, name: e.officer.name })}>
+                        Remove
+                      </Button>
+                    ) : null}
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
 

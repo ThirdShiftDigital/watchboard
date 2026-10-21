@@ -1,4 +1,4 @@
-import { eventTouchesDate } from "./dates.ts";
+import { eventTouchesDate, weekdayOf } from "./dates.ts";
 import type {
   CalendarEvent,
   DutyOverride,
@@ -294,4 +294,46 @@ export function approvedLeaveInRange(
   return rows.sort(
     (a, b) => a.startDate.localeCompare(b.startDate) || a.name.localeCompare(b.name),
   );
+}
+
+export type OffDayEntry = {
+  officer: Officer;
+  status: DutyStatus;
+  statusLabel: string;
+  /** Approved request behind it (leave / sick / call-in). */
+  leaveId?: number;
+  /** Off side of a swap. */
+  overrideKind?: OverrideKind;
+  eventTitle?: string;
+};
+
+/**
+ * Calendar day list: ONLY people off that day — approved leave (incl. sick /
+ * call-in), Google-calendar leave, standing RDO, and the off side of a swap.
+ * On-duty people (including overtime) are left out. Leave first, then
+ * calendar, then RDO, roster order within each.
+ */
+export function offOnDate(
+  date: string,
+  officers: Officer[],
+  requests: TimeOffRequest[],
+  events: CalendarEvent[],
+  overrides: DutyOverride[],
+): OffDayEntry[] {
+  const weekday = weekdayOf(date);
+  const rank = { leave: 0, calendar: 1, rdo: 2, working: 3 } as Record<string, number>;
+  return officers
+    .map((officer) => {
+      const s = statusForOfficer(officer, weekday, date, requests, events, overrides);
+      return {
+        officer,
+        status: s.status,
+        statusLabel: s.statusLabel,
+        leaveId: s.leaveId,
+        overrideKind: s.status !== "working" ? s.override : undefined,
+        eventTitle: s.eventTitle,
+      };
+    })
+    .filter((e) => e.status !== "working")
+    .sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9));
 }
