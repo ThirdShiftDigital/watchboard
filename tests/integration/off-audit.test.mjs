@@ -8,6 +8,8 @@ let ov;
 let audit;
 let alexander;
 let mayfield;
+let burnsId;
+const burns2 = () => burnsId;
 
 before(async () => {
   app = await startApp();
@@ -19,6 +21,7 @@ before(async () => {
     (await app.sql`select id from officers where shift_id = 'second-shift' and name like ${like}`)[0].id;
   alexander = await byName("%ALEXANDER%");
   mayfield = await byName("%MAYFIELD%");
+  burnsId = await byName("%BURNS%");
   await seedLogin(app.sql, { id: "oa_sup2", name: "Sgt Two", permission: "supervisor", agencyId: "home", shiftId: "second-shift" });
   await seedLogin(app.sql, { id: "oa_cmd2", name: "Lt Second", permission: "admin", agencyId: "home", shiftId: "second-shift" });
   await seedLogin(app.sql, { id: "oa_cmd3", name: "Lt Third", permission: "admin", agencyId: "home", shiftId: "third-shift" });
@@ -98,6 +101,36 @@ describe("off audit trail", () => {
     for (const who of ["oa_sup2", "oa_cmd3", "oa_cap", "oa_off2"]) {
       const out = await audit.withAuditStamps(await staff.accessFor(who), "second-shift", "request", entries);
       assert.equal("audit" in out[0], false, who);
+    }
+  });
+});
+
+describe("time-off totals + report (print / PDF / email)", () => {
+  it("commander gets totals and report; everyone else is refused like history", async () => {
+    await app.sql`
+      insert into time_off_requests (officer_id, start_date, end_date, kind, reason, status)
+      values (${burns2()}, '2026-09-06', '2026-09-08', 'vacation', '', 'approved')`;
+    const officerId = burns2();
+    const input = { officerId, unit: "week", anchor: "2026-09-09" };
+    const t = await audit.officerTimeOffFor("oa_cmd2", input);
+    assert.equal(t.from, "2026-09-06");
+    assert.ok(t.total >= 1);
+    const r = await audit.officerReportFor("oa_cmd2", input);
+    assert.equal(r.totals.total, t.total);
+    assert.ok(Array.isArray(r.history));
+    for (const who of ["oa_sup2", "oa_cmd3", "oa_cap", "oa_off2"]) {
+      await assert.rejects(() => audit.officerTimeOffFor(who, input), /Only the shift commander/, who);
+      await assert.rejects(() => audit.officerReportFor(who, input), /Only the shift commander/, who);
+    }
+    await assert.rejects(() => audit.officerReportFor("oa_cmd2", { ...input, officerId: "nope" }), /Only the shift commander/);
+  });
+
+  it("portal field is present for the commander only", async () => {
+    const staff = await app.load("/src/lib/staff.ts");
+    const yes = await audit.portalTimeOff(await staff.accessFor("oa_cmd2"), burns2(), "2026-09-09");
+    assert.ok(yes && yes.week && yes.month);
+    for (const who of ["oa_sup2", "oa_cmd3", "oa_cap", "oa_off2"]) {
+      assert.equal(await audit.portalTimeOff(await staff.accessFor(who), burns2(), "2026-09-09"), null, who);
     }
   });
 });

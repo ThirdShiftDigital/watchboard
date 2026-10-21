@@ -25,14 +25,31 @@ export function isShiftCommander(v: AuditViewer): boolean {
   return !v.unassigned && v.permission === "admin" && !v.isOwner && !v.agencyAdmin && Boolean(v.homeShiftId) && Boolean(v.agencyId);
 }
 
-/** May `v` see the audit for an entry whose officer is on `entry.shiftId`? */
+/**
+ * Who sees audit history, time-off totals, print and PDF/email exports.
+ *   A = only the shift commander of that shift
+ *   B = A + division leaders (captain / agency admin) in the same agency
+ *   C = B + the operator (owner)
+ * ONE-LINE SWITCH: change this constant.
+ */
+export type AuditAudience = "A" | "B" | "C";
+export const OFF_AUDIT_AUDIENCE: AuditAudience = "A";
+
+/**
+ * The single shared visibility rule (server-enforced everywhere: loaders,
+ * history, totals, print / PDF report). May `v` see audit-level data for an
+ * entry or officer on `entry.shiftId`?
+ */
 export function canSeeOffAudit(
   v: AuditViewer,
   entry: { shiftId: string | null; agencyId: string | null },
+  audience: AuditAudience = OFF_AUDIT_AUDIENCE,
 ): boolean {
-  if (!isShiftCommander(v)) return false;
-  if (!entry.shiftId || !entry.agencyId) return false;
-  return entry.agencyId === v.agencyId && entry.shiftId === v.homeShiftId;
+  if (v.unassigned || !entry.shiftId || !entry.agencyId) return false;
+  if (audience === "C" && v.isOwner) return true;
+  if (!v.agencyId || v.agencyId !== entry.agencyId) return false;
+  if (audience !== "A" && (v.permission === "captain" || v.agencyAdmin)) return true;
+  return isShiftCommander(v) && entry.shiftId === v.homeShiftId;
 }
 
 export type OffAuditAction =

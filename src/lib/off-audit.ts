@@ -9,8 +9,14 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
-import { accessFor } from "@/lib/staff";
-import { canSeeOffAudit, isShiftCommander, type AuditViewer, type OffAuditAction } from "@/lib/off-audit-rules";
+import type { accessFor } from "@/lib/staff";
+
+async function loadAccess(userId: string) {
+  const { accessFor: f } = await import("@/lib/staff");
+  return f(userId);
+}
+import { countTimeOff, periodRange, type PeriodUnit, type TimeOffTotals } from "@/lib/time-off-totals";
+import { canSeeOffAudit, type AuditViewer, type OffAuditAction } from "@/lib/off-audit-rules";
 
 export type OffAuditEntityType = "request" | "override";
 
@@ -110,7 +116,7 @@ async function shiftAgency(shiftId: string): Promise<string | null> {
  */
 export async function mayAuditShift(access: Access, shiftId: string | null | undefined): Promise<boolean> {
   const viewer = auditViewerFrom(access);
-  if (!shiftId || !isShiftCommander(viewer)) return false;
+  if (!shiftId) return false;
   return canSeeOffAudit(viewer, { shiftId, agencyId: await shiftAgency(shiftId) });
 }
 
@@ -164,7 +170,7 @@ export async function offHistoryFor(
   userId: string,
   data: { entityType: OffAuditEntityType; entityId: number },
 ): Promise<{ entries: OffAuditEntry[] }> {
-  const access = await accessFor(userId);
+  const access = await loadAccess(userId);
   const sql = await sqlNow();
   // Scope by where the entry's officer is now; fall back to the shift recorded
   // on the audit rows if the entry itself was deleted.
@@ -188,7 +194,7 @@ export async function offHistoryFor(
   }
   // Same message whether the entry is missing or out of scope.
   if (!(await mayAuditShift(access, shiftId))) {
-    throw new Error("Only the shift commander can see this history.");
+    throw new Error(AUDIT_REFUSED);
   }
   try {
     const rows = await sql.query(
@@ -218,3 +224,120 @@ export const getOffHistory = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(z.object({ entityType: z.enum(["request", "override"]), entityId: z.number().int().positive() }))
   .handler(({ data, context }) => offHistoryFor(context.userId, data));
+
+// ---------------------------------------------------------------------------
+// Time-off totals + exportable report (print / PDF / mailto). Same gate.
+
+
+export const AUDIT_REFUSED = "Only the shift commander can see this history.";
+
+type OfficerFacts = { id: string; name: string; shiftId: string | null; shiftName: string; rdoDays: number[] };
+
+async function officerFacts(officerId: string): Promise<OfficerFacts | null> {
+  const sql = await sqlNow();
+  const rows = await sql<{ id: string; name: string; shift_id: string | null; shift_name: string | null; rdo_days: string }>`
+    select o.id, o.name, o.shift_id, s.name as shift_name, o.rdo_days
+    from officers o left join shifts s on s.id = o.shift_id where o.id = ${officerId}
+  `;
+  const r = rows[0];
+  if (!r) return null;
+  const { parseRdoDays } = await import("@/lib/dates");
+  return { id: r.id, name: r.name, shiftId: r.shift_id, shiftName: r.shift_name ?? "", rdoDays: parseRdoDays(r.rdo_days) };
+}
+
+/** Throws AUDIT_REFUSED unless the viewer passes the shared rule for this officer's shift. */
+async function gateOfficer(userId: string, officerId: string): Promise<OfficerFacts> {
+  const access = await loadAccess(userId);
+  const facts = await officerFacts(officerId);
+  if (!facts || !(await mayAuditShift(access, facts.shiftId))) throw new Error(AUDIT_REFUSED);
+  return facts;
+}
+
+async function totalsFor(facts: OfficerFacts, unit: PeriodUnit, anchor: string): Promise<TimeOffTotals> {
+  const { from, to } = periodRange(unit, anchor);
+  const sql = await sqlNow();
+  const reqs = await sql<{ status: string; kind: string; start_date: string; end_date: string }>`
+    select status, kind, start_date, end_date from time_off_requests
+    where officer_id = ${facts.id} and status = 'approved' and start_date <= ${to} and end_date >= ${from}
+  `;
+  return countTimeOff(
+    unit,
+    anchor,
+    reqs.map((r) => ({ status: r.status, kind: r.kind, startDate: r.start_date, endDate: r.end_date })),
+    facts.rdoDays,
+  );
+}
+
+/** Week + month totals for the officer portal — or null (field omitted) for everyone else. */
+export async function portalTimeOff(
+  access: Access,
+  officerId: string,
+  anchor: string,
+): Promise<{ week: TimeOffTotals; month: TimeOffTotals } | null> {
+  const facts = await officerFacts(officerId);
+  if (!facts || !(await mayAuditShift(access, facts.shiftId))) return null;
+  return { week: await totalsFor(facts, "week", anchor), month: await totalsFor(facts, "month", anchor) };
+}
+
+export async function officerTimeOffFor(
+  userId: string,
+  data: { officerId: string; unit: PeriodUnit; anchor: string },
+): Promise<TimeOffTotals & { officerName: string }> {
+  const facts = await gateOfficer(userId, data.officerId);
+  return { ...(await totalsFor(facts, data.unit, data.anchor)), officerName: facts.name };
+}
+
+/** Everything the print view / PDF / email summary needs. */
+export async function officerReportFor(
+  userId: string,
+  data: { officerId: string; unit: PeriodUnit; anchor: string },
+) {
+  const facts = await gateOfficer(userId, data.officerId);
+  const totals = await totalsFor(facts, data.unit, data.anchor);
+  const sql = await sqlNow();
+  let history: Array<{ id: number; action: string; actorName: string; at: string; summary: string }> = [];
+  try {
+    // Audit rows for this officer's entries that touch the period, or that were
+    // written during it.
+    const rows = (await sql.query(
+      `select a.id, a.action, a.actor_name, a.summary,
+              to_char(a.at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as at
+       from off_audit a
+       where a.officer_id = $1 and (
+         (a.at at time zone 'America/Chicago')::date between $2::date and $3::date
+         or (a.entity_type = 'request' and a.entity_id in (
+              select id::text from time_off_requests
+              where officer_id = $1 and start_date <= $3::text and end_date >= $2::text))
+         or (a.after->>'date' between $2::text and $3::text) or (a.before->>'date' between $2::text and $3::text)
+       )
+       order by a.at asc, a.id asc limit 300`,
+      [facts.id, totals.from, totals.to],
+    )) as Array<{ id: number; action: string; actor_name: string; summary: string; at: string }>;
+    history = rows.map((r) => ({
+      id: Number(r.id),
+      action: r.action,
+      actorName: r.actor_name || "Not recorded",
+      at: r.at,
+      summary: r.summary,
+    }));
+  } catch (err) {
+    if (!isMissing(err)) throw err;
+  }
+  return { officerId: facts.id, officerName: facts.name, shiftName: facts.shiftName, totals, history };
+}
+
+const reportInput = z.object({
+  officerId: z.string().min(1),
+  unit: z.enum(["week", "month"]),
+  anchor: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+});
+
+export const getOfficerTimeOff = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(reportInput)
+  .handler(({ data, context }) => officerTimeOffFor(context.userId, data));
+
+export const getOfficerReport = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(reportInput)
+  .handler(({ data, context }) => officerReportFor(context.userId, data));

@@ -16,7 +16,7 @@ import { buildRows, deriveLastName, leaveEventDescription, leaveEventSummary, st
 import { applySeniority, normalizeZoneOrder, sortRoster } from "@/lib/types";
 import { requestForBlock } from "@/lib/access";
 import { isMissingTable, loadOverrides } from "@/lib/overrides-db";
-import { recordOffAudit, withAuditStamps } from "@/lib/off-audit";
+import { portalTimeOff, recordOffAudit, withAuditStamps } from "@/lib/off-audit";
 import { cleanDenialReason, decisionBlock, visibleDenialReason } from "@/lib/request-decision";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { requireCap, accessFor, officerPlacement } from "@/lib/staff";
@@ -513,7 +513,9 @@ export const getOfficerPortal = createServerFn({ method: "POST" })
       );
       todayRow = rows[0] ?? null;
     }
+    const timeOff = officer ? await portalTimeOff(access, officer.id, today) : null;
     return {
+      ...(timeOff ? { timeOff } : {}),
       officers,
       officer,
       requests,
@@ -524,6 +526,7 @@ export const getOfficerPortal = createServerFn({ method: "POST" })
       unassigned: false,
       calendar,
       overrides,
+      // Shift commander of this officer's shift only; omitted for everyone else.
     };
   });
 

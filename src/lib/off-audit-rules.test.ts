@@ -37,3 +37,15 @@ describe("off audit visibility", () => {
     assert.equal(actionLabel("ended_early"), "Ended early");
   });
 });
+
+describe("audience switch", () => {
+  const cap: AuditViewer = { ...cmd, permission: "captain", homeShiftId: null };
+  const owner: AuditViewer = { ...cmd, isOwner: true, agencyId: null, homeShiftId: null };
+  it("B adds division leaders, C adds the operator", () => {
+    assert.equal(canSeeOffAudit(cap, entry, "A"), false);
+    assert.equal(canSeeOffAudit(cap, entry, "B"), true);
+    assert.equal(canSeeOffAudit(owner, entry, "B"), false);
+    assert.equal(canSeeOffAudit(owner, entry, "C"), true);
+    assert.equal(canSeeOffAudit({ ...cmd, homeShiftId: "third-shift" }, entry, "C"), false);
+  });
+});
