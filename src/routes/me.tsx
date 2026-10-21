@@ -215,7 +215,7 @@ function OfficerPage() {
               <TodayStatus row={watchRow} />
             </section>
 
-            {timeOff ? <TimeOffTotalsCard key={officer.id} officerId={officer.id} initial={timeOff} /> : null}
+            {timeOff ? <TimeOffTotalsCard key={officer.id} officerId={officer.id} initial={timeOff} roster={officers.map((o) => ({ id: o.id, name: o.name, unit: o.unit }))} /> : null}
 
             <section>
               <p className="mb-2 text-2xs uppercase tracking-wide text-muted">This week</p>

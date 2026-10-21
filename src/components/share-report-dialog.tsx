@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Download, Mail, X } from "lucide-react";
 import { useState } from "react";
 import { getOfficerReport } from "@/lib/off-audit";
-import { downloadReportPdf, reportToLines } from "@/lib/report-export";
+import { downloadReportPdf, reportSubject, reportToLines } from "@/lib/report-export";
 import { mailtoHref, type PeriodUnit } from "@/lib/time-off-totals";
 
 /**
@@ -12,23 +12,23 @@ import { mailtoHref, type PeriodUnit } from "@/lib/time-off-totals";
  * a PDF they can attach.
  */
 export function ShareReportDialog({
-  officerId,
+  officerIds,
   unit,
   anchor,
   onClose,
 }: {
-  officerId: string;
+  officerIds: string[];
   unit: PeriodUnit;
   anchor: string;
   onClose: () => void;
 }) {
   const [to, setTo] = useState("");
   const q = useQuery({
-    queryKey: ["officer-report", officerId, unit, anchor],
-    queryFn: () => getOfficerReport({ data: { officerId, unit, anchor } }),
+    queryKey: ["officer-report", officerIds, unit, anchor],
+    queryFn: () => getOfficerReport({ data: { officerIds, unit, anchor } }),
   });
   const lines = q.data ? reportToLines(q.data) : [];
-  const subject = q.data ? `Time off: ${q.data.officerName} ${q.data.totals.from} to ${q.data.totals.to}` : "";
+  const subject = q.data ? reportSubject(q.data) : "";
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 sm:items-center" role="dialog" aria-label="Email time off">
       <div className="max-h-[90vh] w-full max-w-md overflow-auto rounded-t-xl bg-card p-4 sm:rounded-xl">

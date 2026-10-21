@@ -106,23 +106,55 @@ describe("off audit trail", () => {
 });
 
 describe("time-off totals + report (print / PDF / email)", () => {
-  it("commander gets totals and report; everyone else is refused like history", async () => {
+  it("single officer: commander gets totals and report; everyone else is refused like history", async () => {
     await app.sql`
       insert into time_off_requests (officer_id, start_date, end_date, kind, reason, status)
       values (${burns2()}, '2026-09-06', '2026-09-08', 'vacation', '', 'approved')`;
-    const officerId = burns2();
-    const input = { officerId, unit: "week", anchor: "2026-09-09" };
+    const input = { officerIds: [burns2()], unit: "week", anchor: "2026-09-09" };
     const t = await audit.officerTimeOffFor("oa_cmd2", input);
     assert.equal(t.from, "2026-09-06");
+    assert.equal(t.officers.length, 1);
     assert.ok(t.total >= 1);
     const r = await audit.officerReportFor("oa_cmd2", input);
-    assert.equal(r.totals.total, t.total);
-    assert.ok(Array.isArray(r.history));
+    assert.equal(r.officers.length, 1);
+    assert.equal(r.total, t.total);
+    assert.ok(Array.isArray(r.officers[0].history));
     for (const who of ["oa_sup2", "oa_cmd3", "oa_cap", "oa_off2"]) {
       await assert.rejects(() => audit.officerTimeOffFor(who, input), /Only the shift commander/, who);
       await assert.rejects(() => audit.officerReportFor(who, input), /Only the shift commander/, who);
     }
-    await assert.rejects(() => audit.officerReportFor("oa_cmd2", { ...input, officerId: "nope" }), /Only the shift commander/);
+    await assert.rejects(() => audit.officerReportFor("oa_cmd2", { ...input, officerIds: ["nope"] }), /Only the shift commander/);
+    await assert.rejects(() => audit.officerReportFor("oa_cmd2", { ...input, officerIds: [] }), /at least one/);
+  });
+
+  it("several officers: per-officer breakdown and a combined total", async () => {
+    await app.sql`
+      insert into time_off_requests (officer_id, start_date, end_date, kind, reason, status)
+      values (${mayfield}, '2026-09-10', '2026-09-10', 'sick', '', 'approved')`;
+    const input = { officerIds: [burns2(), mayfield, burns2()], unit: "week", anchor: "2026-09-09" };
+    const t = await audit.officerTimeOffFor("oa_cmd2", input);
+    assert.deepEqual(t.officers.map((o) => o.officerId), [burns2(), mayfield]); // deduped, in order
+    assert.equal(t.total, t.officers[0].total + t.officers[1].total);
+    assert.equal(t.byKind.sick, 1);
+    const r = await audit.officerReportFor("oa_cmd2", input);
+    assert.equal(r.officers.length, 2);
+    assert.equal(r.total, t.total);
+  });
+
+  it("all officers on the shift", async () => {
+    const all = (await app.sql`select id from officers where shift_id = 'second-shift'`).map((o) => o.id);
+    const r = await audit.officerReportFor("oa_cmd2", { officerIds: all, unit: "month", anchor: "2026-09-09" });
+    assert.equal(r.officers.length, all.length);
+    assert.equal(r.total, r.officers.reduce((n, o) => n + o.totals.total, 0));
+  });
+
+  it("refuses a selection that mixes in an officer from another shift (nobody silently dropped)", async () => {
+    const third = (await app.sql`select id from officers where shift_id = 'third-shift' limit 1`)[0].id;
+    const input = { officerIds: [burns2(), third, mayfield], unit: "week", anchor: "2026-09-09" };
+    await assert.rejects(() => audit.officerTimeOffFor("oa_cmd2", input), /Only the shift commander/);
+    await assert.rejects(() => audit.officerReportFor("oa_cmd2", input), /Only the shift commander/);
+    // ...and the third-shift commander can't use the second-shift officers either.
+    await assert.rejects(() => audit.officerReportFor("oa_cmd3", input), /Only the shift commander/);
   });
 
   it("portal field is present for the commander only", async () => {

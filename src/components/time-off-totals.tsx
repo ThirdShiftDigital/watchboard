@@ -8,6 +8,8 @@ import { periodRange, shiftPeriod, type PeriodUnit, type TimeOffTotals } from "@
 import { kindLabel, type RequestKind } from "@/lib/types";
 import { cn } from "@/lib/cn";
 import { ShareReportDialog } from "@/components/share-report-dialog";
+import { OfficerPicker } from "@/components/officer-picker";
+import { Users } from "lucide-react";
 
 /**
  * Days off this week / month for one officer, with prev / next. Rendered only
@@ -17,21 +19,35 @@ import { ShareReportDialog } from "@/components/share-report-dialog";
 export function TimeOffTotalsCard({
   officerId,
   initial,
+  roster,
 }: {
   officerId: string;
   initial: { week: TimeOffTotals; month: TimeOffTotals };
+  /** Officers on the commander's shift, for the picker. */
+  roster: { id: string; name: string; unit?: string }[];
 }) {
   const today = todayISO();
   const [unit, setUnit] = useState<PeriodUnit>("week");
   const [anchor, setAnchor] = useState(today);
   const [sharing, setSharing] = useState(false);
-  const isCurrent = periodRange(unit, anchor).from === periodRange(unit, today).from;
+  const [picking, setPicking] = useState(false);
+  const [selected, setSelected] = useState<string[]>([officerId]);
+  const onlySelf = selected.length === 1 && selected[0] === officerId;
+  const isCurrent = onlySelf && periodRange(unit, anchor).from === periodRange(unit, today).from;
   const q = useQuery({
-    queryKey: ["officer-timeoff", officerId, unit, anchor],
-    queryFn: () => getOfficerTimeOff({ data: { officerId, unit, anchor } }),
+    queryKey: ["officer-timeoff", selected, unit, anchor],
+    queryFn: () => getOfficerTimeOff({ data: { officerIds: selected, unit, anchor } }),
     enabled: !isCurrent,
   });
-  const t: TimeOffTotals | undefined = isCurrent ? initial[unit] : q.data;
+  const t: Pick<TimeOffTotals, "total" | "byKind"> | undefined = isCurrent ? initial[unit] : q.data;
+  const perOfficer = !isCurrent && q.data && q.data.officers.length > 1 ? q.data.officers : [];
+  const nameOf = (id: string) => roster.find((o) => o.id === id)?.name ?? id;
+  const whoLabel =
+    selected.length === roster.length && roster.length > 1
+      ? `All officers (${roster.length})`
+      : selected.length === 1
+        ? nameOf(selected[0]!)
+        : `${selected.length} officers`;
   const title =
     unit === "week"
       ? `Week of ${formatShort(periodRange(unit, anchor).from)}`
@@ -56,6 +72,17 @@ export function TimeOffTotalsCard({
           ))}
         </div>
       </div>
+      <button
+        type="button"
+        onClick={() => setPicking(true)}
+        className="mt-3 flex min-h-[44px] w-full items-center justify-between gap-2 rounded-md border border-border px-3 text-left text-sm"
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <Users className="size-4 shrink-0 text-muted" />
+          <span className="truncate">{whoLabel}</span>
+        </span>
+        <span className="text-2xs uppercase tracking-wide text-primary">Change</span>
+      </button>
       <div className="mt-3 flex items-center justify-between gap-2">
         <button
           type="button"
@@ -90,12 +117,22 @@ export function TimeOffTotalsCard({
           ))}
         </ul>
       ) : null}
+      {perOfficer.length ? (
+        <ul className="mt-3 divide-y divide-border rounded-md border border-border text-sm">
+          {perOfficer.map((o) => (
+            <li key={o.officerId} className="flex items-center justify-between gap-2 px-3 py-2">
+              <span className="truncate">{o.officerName}</span>
+              <span className="tabular font-semibold">{o.total}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       {q.isError ? <p className="mt-2 text-center text-xs text-destructive">{(q.error as Error).message}</p> : null}
       <p className="mt-2 text-center text-micro text-subtle">Approved leave only · RDOs not counted · Central time</p>
       <div className="mt-3 grid grid-cols-2 gap-2">
         <Link
           to="/print-timeoff"
-          search={{ officerId, unit, anchor }}
+          search={{ officerIds: selected.join(","), unit, anchor }}
           target="_blank"
           className="flex min-h-[40px] items-center justify-center gap-1.5 rounded-md border border-border text-sm"
         >
@@ -109,7 +146,18 @@ export function TimeOffTotalsCard({
           <Mail className="size-4" /> Email
         </button>
       </div>
-      {sharing ? <ShareReportDialog officerId={officerId} unit={unit} anchor={anchor} onClose={() => setSharing(false)} /> : null}
+      {sharing ? <ShareReportDialog officerIds={selected} unit={unit} anchor={anchor} onClose={() => setSharing(false)} /> : null}
+      {picking ? (
+        <OfficerPicker
+          officers={roster}
+          selected={selected}
+          onClose={() => setPicking(false)}
+          onDone={(ids) => {
+            setSelected(ids);
+            setPicking(false);
+          }}
+        />
+      ) : null}
     </section>
   );
 }

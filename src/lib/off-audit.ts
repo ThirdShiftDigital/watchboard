@@ -279,20 +279,62 @@ export async function portalTimeOff(
   return { week: await totalsFor(facts, "week", anchor), month: await totalsFor(facts, "month", anchor) };
 }
 
-export async function officerTimeOffFor(
-  userId: string,
-  data: { officerId: string; unit: PeriodUnit; anchor: string },
-): Promise<TimeOffTotals & { officerName: string }> {
-  const facts = await gateOfficer(userId, data.officerId);
-  return { ...(await totalsFor(facts, data.unit, data.anchor)), officerName: facts.name };
+/**
+ * Gate EVERY selected officer with the shared rule before reading anything.
+ * One officer off the caller's shift (or unknown) refuses the whole request;
+ * nobody is silently dropped.
+ */
+async function gateOfficers(userId: string, officerIds: string[]): Promise<OfficerFacts[]> {
+  const ids = [...new Set(officerIds)];
+  if (!ids.length) throw new Error("Pick at least one officer.");
+  const out: OfficerFacts[] = [];
+  for (const id of ids) out.push(await gateOfficer(userId, id));
+  return out;
+}
+
+function sumKinds(list: Array<{ byKind: Record<string, number> }>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const x of list) for (const [k, n] of Object.entries(x.byKind)) out[k] = (out[k] ?? 0) + n;
+  return out;
+}
+
+export type SelectionInput = { officerIds: string[]; unit: PeriodUnit; anchor: string };
+
+/** Totals for the selected officers (one, several or the whole shift). */
+export async function officerTimeOffFor(userId: string, data: SelectionInput) {
+  const facts = await gateOfficers(userId, data.officerIds);
+  const officers = [];
+  for (const f of facts) officers.push({ officerId: f.id, officerName: f.name, ...(await totalsFor(f, data.unit, data.anchor)) });
+  const { from, to } = periodRange(data.unit, data.anchor);
+  return {
+    unit: data.unit,
+    from,
+    to,
+    total: officers.reduce((n, o) => n + o.total, 0),
+    byKind: sumKinds(officers),
+    officers,
+  };
+}
+
+/** Everything the print view / PDF / email summary needs, for the selection. */
+export async function officerReportFor(userId: string, data: SelectionInput) {
+  const facts = await gateOfficers(userId, data.officerIds);
+  const officers = [];
+  for (const f of facts) officers.push(await officerReportOne(f, data));
+  const { from, to } = periodRange(data.unit, data.anchor);
+  return {
+    unit: data.unit,
+    from,
+    to,
+    shiftName: facts[0]?.shiftName ?? "",
+    total: officers.reduce((n, o) => n + o.totals.total, 0),
+    byKind: sumKinds(officers.map((o) => o.totals)),
+    officers,
+  };
 }
 
 /** Everything the print view / PDF / email summary needs. */
-export async function officerReportFor(
-  userId: string,
-  data: { officerId: string; unit: PeriodUnit; anchor: string },
-) {
-  const facts = await gateOfficer(userId, data.officerId);
+async function officerReportOne(facts: OfficerFacts, data: { unit: PeriodUnit; anchor: string }) {
   const totals = await totalsFor(facts, data.unit, data.anchor);
   const sql = await sqlNow();
   let history: Array<{ id: number; action: string; actorName: string; at: string; summary: string }> = [];
@@ -327,7 +369,7 @@ export async function officerReportFor(
 }
 
 const reportInput = z.object({
-  officerId: z.string().min(1),
+  officerIds: z.array(z.string().min(1).max(80)).min(1).max(200),
   unit: z.enum(["week", "month"]),
   anchor: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 });
